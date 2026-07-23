@@ -15,7 +15,7 @@ UI とネットワーク機能は含まない(利用側アプリの責務)。
 
 ## 使い方
 
-TBD — 実装言語(TypeScript / Rust / MoonBit を検討中)が決まり次第記載する。現状は [docs/architecture.md](docs/architecture.md) を参照。
+TBD — 実装は Rust コア crate + wasm 配布層 + 薄い TS クライアントの 3 層構成([docs/architecture.md](docs/architecture.md) 参照)。API が固まり次第、利用方法を記載する。
 
 ## ドキュメント
 
