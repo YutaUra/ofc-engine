@@ -120,20 +120,30 @@ fn resolve_best(
         }
     }
 
-    // (foul 回避, royalty 合計, 行の強さ) の優先度キーで最良の割り当てを選ぶ
-    let key_of = |top: &RowEval, middle: &RowEval, bottom: &RowEval| -> SelectionKey {
+    // (foul 回避, royalty 合計, 行の強さ) の優先度キーで最良の割り当てを選ぶ。
+    // HandRank の clone(ヒープ確保)は「最良を更新したときだけ」に限定する。
+    // 大半の候補は (foul, royalty) か最初の行比較で負けるため、比較は参照で行う。
+    let mut best: Option<(SelectionKey, Vec<Card>)> = None;
+    let mut consider = |top: &RowEval, middle: &RowEval, bottom: &RowEval, assignment: &[Card]| {
         let foul = middle.0 < top.0 || bottom.0 < middle.0;
         let total = if foul { 0 } else { top.1 + middle.1 + bottom.1 };
-        (
-            !foul,
-            total,
-            [bottom.0.clone(), middle.0.clone(), top.0.clone()],
-        )
-    };
-
-    let mut best: Option<(SelectionKey, Vec<Card>)> = None;
-    let mut consider = |key: SelectionKey, assignment: &[Card]| {
-        if best.as_ref().is_none_or(|(bk, _)| key > *bk) {
+        let improved = match &best {
+            None => true,
+            Some(((best_not_foul, best_total, best_hands), _)) => {
+                (!foul, total, [&bottom.0, &middle.0, &top.0])
+                    > (
+                        *best_not_foul,
+                        *best_total,
+                        [&best_hands[0], &best_hands[1], &best_hands[2]],
+                    )
+            }
+        };
+        if improved {
+            let key = (
+                !foul,
+                total,
+                [bottom.0.clone(), middle.0.clone(), top.0.clone()],
+            );
             best = Some((key, assignment.to_vec()));
         }
     };
@@ -151,7 +161,7 @@ fn resolve_best(
                         fixed[idx].as_ref().expect("Joker なし行は評価済み")
                     }
                 };
-                consider(key_of(get(0), get(1), get(2)), &[c]);
+                consider(get(0), get(1), get(2), &[c]);
             }
         }
         [(r0, p0), (r1, p1)] if r0 == r1 => {
@@ -169,7 +179,7 @@ fn resolve_best(
                             fixed[idx].as_ref().expect("Joker なし行は評価済み")
                         }
                     };
-                    consider(key_of(get(0), get(1), get(2)), &[c0, c1]);
+                    consider(get(0), get(1), get(2), &[c0, c1]);
                 }
             }
         }
@@ -201,10 +211,7 @@ fn resolve_best(
                             fixed[idx].as_ref().expect("Joker なし行は評価済み")
                         }
                     };
-                    consider(
-                        key_of(get(0), get(1), get(2)),
-                        &[candidates[i], candidates[j]],
-                    );
+                    consider(get(0), get(1), get(2), &[candidates[i], candidates[j]]);
                 }
             }
         }
