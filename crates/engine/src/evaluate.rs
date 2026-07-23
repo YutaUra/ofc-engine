@@ -148,10 +148,49 @@ fn resolve_best(
         }
     };
 
+    // 単一行内の Joker 候補は「ランク + フラッシュ関与スート」の同値類に
+    // 削減できる(役評価はスートをフラッシュ以外で見ないため、同ランク・
+    // 同フラッシュ関与の候補は必ず同じ行評価になる)。max_per_rank は
+    // 同一行に Joker 2 枚があるとき同ランクペア(例: 5♠5♥)を残すため。
+    let dedup_for_row = |row_idx: usize, max_per_rank: usize| -> Vec<Card> {
+        let fixed_cards: Vec<&Card> = rows[row_idx]
+            .iter()
+            .filter(|c| matches!(c, Card::Standard { .. }))
+            .collect();
+        // 行の確定カードが単一スートのときだけフラッシュが成立しうる
+        let flush_suit = match fixed_cards.as_slice() {
+            [] => None,
+            [Card::Standard { suit, .. }, rest @ ..] => rest
+                .iter()
+                .all(|c| matches!(c, Card::Standard { suit: s, .. } if s == suit))
+                .then_some(*suit),
+            _ => None,
+        };
+        // top(3 枚行)はフラッシュ自体が存在しない
+        let flush_suit = if row_idx == 0 { None } else { flush_suit };
+
+        let mut kept = Vec::new();
+        let mut normal_count = [0usize; 13];
+        for &c in candidates {
+            let Card::Standard { rank, suit } = c else {
+                continue;
+            };
+            let is_flush_suit = flush_suit == Some(suit);
+            if is_flush_suit || normal_count[rank as usize] < max_per_rank {
+                if !is_flush_suit {
+                    normal_count[rank as usize] += 1;
+                }
+                kept.push(c);
+            }
+        }
+        kept
+    };
+
     match slots {
         [(r0, p0)] => {
+            let candidates = dedup_for_row(*r0, 1);
             let mut row = rows[*r0].to_vec();
-            for &c in candidates {
+            for &c in &candidates {
                 row[*p0] = c;
                 let evaluated = eval_row(*r0, &row)?;
                 let get = |idx: usize| -> &RowEval {
@@ -166,6 +205,7 @@ fn resolve_best(
         }
         [(r0, p0), (r1, p1)] if r0 == r1 => {
             // 同一行内の 2 枚: 行内の並びは役に影響しないため非順序ペアで足りる
+            let candidates = dedup_for_row(*r0, 2);
             let mut row = rows[*r0].to_vec();
             for (i, &c0) in candidates.iter().enumerate() {
                 for &c1 in &candidates[(i + 1)..] {
@@ -184,10 +224,18 @@ fn resolve_best(
             }
         }
         [(r0, p0), (r1, p1)] => {
-            // 別々の行: 行ごとに候補別評価を先に作り、組み合わせはキャッシュ参照のみ
-            let per_row = |row_idx: usize, pos: usize| -> Result<Vec<RowEval>, EvaluateError> {
+            // 別々の行: 行ごとに候補別評価を先に作り、組み合わせはキャッシュ参照のみ。
+            // 同値類削減は各行独立に行うが、ランクごとに 2 枚残すため
+            // 「両行が同ランクを使いたいが物理カードが 1 枚しか残っていない」
+            // ケースを潰さない(1 枚しか無いなら元の総当たりでも共有は不可能)。
+            let cand0 = dedup_for_row(*r0, 2);
+            let cand1 = dedup_for_row(*r1, 2);
+            let per_row = |row_idx: usize,
+                           pos: usize,
+                           cands: &[Card]|
+             -> Result<Vec<RowEval>, EvaluateError> {
                 let mut row = rows[row_idx].to_vec();
-                candidates
+                cands
                     .iter()
                     .map(|&c| {
                         row[pos] = c;
@@ -195,11 +243,11 @@ fn resolve_best(
                     })
                     .collect()
             };
-            let evals0 = per_row(*r0, *p0)?;
-            let evals1 = per_row(*r1, *p1)?;
+            let evals0 = per_row(*r0, *p0, &cand0)?;
+            let evals1 = per_row(*r1, *p1, &cand1)?;
             for (i, e0) in evals0.iter().enumerate() {
                 for (j, e1) in evals1.iter().enumerate() {
-                    if i == j {
+                    if cand0[i] == cand1[j] {
                         continue; // 同一カードを 2 枚の Joker に割り当てることはできない
                     }
                     let get = |idx: usize| -> &RowEval {
@@ -211,7 +259,7 @@ fn resolve_best(
                             fixed[idx].as_ref().expect("Joker なし行は評価済み")
                         }
                     };
-                    consider(get(0), get(1), get(2), &[candidates[i], candidates[j]]);
+                    consider(get(0), get(1), get(2), &[cand0[i], cand1[j]]);
                 }
             }
         }
