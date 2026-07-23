@@ -1,0 +1,16 @@
+# wasm 配布層(ADR 0002)。境界は JSON 文字列 API(ADR 0003)。
+# コアロジックは一切持たず、ofc-engine の JSON glue のみを担う。
+[package]
+name = "ofc-engine-wasm"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+ofc-engine = { path = "../engine" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+wasm-bindgen = "0.2"
