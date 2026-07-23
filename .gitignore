@@ -1,1 +1,3 @@
 /target
+# wasm-pack の生成物(package.json の build:wasm で再生成)
+packages/engine/wasm/

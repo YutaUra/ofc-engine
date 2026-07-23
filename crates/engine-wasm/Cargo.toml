@@ -13,4 +13,5 @@ crate-type = ["cdylib", "rlib"]
 ofc-engine = { path = "../engine" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-wasm-bindgen = "0.2"
+# nix の wasm-bindgen-cli と版を厳密一致させる(不一致は wasm-pack ビルドが失敗する)
+wasm-bindgen = "=0.2.121"
