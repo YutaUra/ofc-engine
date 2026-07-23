@@ -24,7 +24,7 @@
   ],
   "scripts": {
     "build:wasm": "wasm-pack build ../../crates/engine-wasm --target web --out-dir ../../packages/engine/wasm --out-name ofc_engine",
-    "build": "npm run build:wasm && tsc -p tsconfig.build.json && cp -R wasm dist/wasm && rm dist/wasm/.gitignore",
+    "build": "npm run build:wasm && rm -rf dist && tsc -p tsconfig.build.json && cp -R wasm dist/wasm && rm -f dist/wasm/.gitignore",
     "typecheck": "tsc --noEmit",
     "prepublishOnly": "npm run build"
   }
