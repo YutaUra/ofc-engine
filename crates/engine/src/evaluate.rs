@@ -82,48 +82,140 @@ fn joker_positions(board: &Board) -> Vec<(usize, usize)> {
         .collect()
 }
 
+/// 行単位の評価キャッシュを使った Joker 解決。
+/// 盤面全体を毎回評価し直すのではなく、Joker を含む行だけを再評価する。
+/// 特に Joker 2 枚が別々の行にある場合、全割り当て(≤2,652 通り)の評価を
+/// 「行ごとの候補評価(≤ 候補数 × 2 回)+ キャッシュ済みキーの組み合わせ比較」
+/// に落とす。オラクルテスト(joker_oracle)で総当たり参照実装との一致を保証。
+/// (役, ロイヤリティ) の行評価キャッシュ。
+type RowEval = (HandRank, u32);
+/// 解決候補の優先度: ファウル回避 > ロイヤリティ合計 > 行の強さ(bottom, middle, top)。
+type SelectionKey = (bool, u32, [HandRank; 3]);
+
 fn resolve_best(
     board: &Board,
     slots: &[(usize, usize)],
     candidates: &[Card],
     royalty: &RoyaltyTable,
 ) -> Result<Board, EvaluateError> {
-    let mut best: Option<(SelectionKey, Board)> = None;
-    let mut consider = |assignment: &[Card]| -> Result<(), EvaluateError> {
-        let trial = with_assignment(board, slots, assignment);
-        let key = selection_key(&trial, royalty)?;
-        if best.as_ref().is_none_or(|(bk, _)| key > *bk) {
-            best = Some((key, trial));
+    let rows: [&[Card]; 3] = [board.top(), board.middle(), board.bottom()];
+
+    let eval_row = |row_idx: usize, cards: &[Card]| -> Result<RowEval, EvaluateError> {
+        let hand = match row_idx {
+            0 => evaluate_three(cards),
+            _ => evaluate_five(cards),
         }
-        Ok(())
+        .map_err(EvaluateError::Eval)?;
+        let row = [Row::Top, Row::Middle, Row::Bottom][row_idx];
+        let points = royalty_points(row, &hand, royalty);
+        Ok((hand, points))
     };
 
-    match slots.len() {
-        1 => {
-            for &c in candidates {
-                consider(&[c])?;
-            }
-        }
-        2 => {
-            // Joker が別の行にあると割り当ての入れ替えで結果が変わるため、
-            // 単一行の解決と違い順序付きペアを総当たりする。
-            for (i, &c0) in candidates.iter().enumerate() {
-                for (j, &c1) in candidates.iter().enumerate() {
-                    if i != j {
-                        consider(&[c0, c1])?;
-                    }
-                }
-            }
-        }
-        n => {
-            // デッキ設定の上限は Joker 2 枚(ADR 0003)。3 枚以上は未対応
-            unimplemented!("Joker {n} 枚の盤面は未対応(デッキ上限は 2 枚)")
+    // Joker を含まない行は 1 回だけ評価して固定する
+    let joker_rows: Vec<usize> = slots.iter().map(|(row, _)| *row).collect();
+    let mut fixed: [Option<RowEval>; 3] = [None, None, None];
+    for (idx, row) in rows.iter().enumerate() {
+        if !joker_rows.contains(&idx) {
+            fixed[idx] = Some(eval_row(idx, row)?);
         }
     }
 
-    Ok(best
-        .expect("候補が空になることはない(52 枚 - 盤面 13 枚 > 0)")
-        .1)
+    // (foul 回避, royalty 合計, 行の強さ) の優先度キーで最良の割り当てを選ぶ
+    let key_of = |top: &RowEval, middle: &RowEval, bottom: &RowEval| -> SelectionKey {
+        let foul = middle.0 < top.0 || bottom.0 < middle.0;
+        let total = if foul { 0 } else { top.1 + middle.1 + bottom.1 };
+        (
+            !foul,
+            total,
+            [bottom.0.clone(), middle.0.clone(), top.0.clone()],
+        )
+    };
+
+    let mut best: Option<(SelectionKey, Vec<Card>)> = None;
+    let mut consider = |key: SelectionKey, assignment: &[Card]| {
+        if best.as_ref().is_none_or(|(bk, _)| key > *bk) {
+            best = Some((key, assignment.to_vec()));
+        }
+    };
+
+    match slots {
+        [(r0, p0)] => {
+            let mut row = rows[*r0].to_vec();
+            for &c in candidates {
+                row[*p0] = c;
+                let evaluated = eval_row(*r0, &row)?;
+                let get = |idx: usize| -> &RowEval {
+                    if idx == *r0 {
+                        &evaluated
+                    } else {
+                        fixed[idx].as_ref().expect("Joker なし行は評価済み")
+                    }
+                };
+                consider(key_of(get(0), get(1), get(2)), &[c]);
+            }
+        }
+        [(r0, p0), (r1, p1)] if r0 == r1 => {
+            // 同一行内の 2 枚: 行内の並びは役に影響しないため非順序ペアで足りる
+            let mut row = rows[*r0].to_vec();
+            for (i, &c0) in candidates.iter().enumerate() {
+                for &c1 in &candidates[(i + 1)..] {
+                    row[*p0] = c0;
+                    row[*p1] = c1;
+                    let evaluated = eval_row(*r0, &row)?;
+                    let get = |idx: usize| -> &RowEval {
+                        if idx == *r0 {
+                            &evaluated
+                        } else {
+                            fixed[idx].as_ref().expect("Joker なし行は評価済み")
+                        }
+                    };
+                    consider(key_of(get(0), get(1), get(2)), &[c0, c1]);
+                }
+            }
+        }
+        [(r0, p0), (r1, p1)] => {
+            // 別々の行: 行ごとに候補別評価を先に作り、組み合わせはキャッシュ参照のみ
+            let per_row = |row_idx: usize, pos: usize| -> Result<Vec<RowEval>, EvaluateError> {
+                let mut row = rows[row_idx].to_vec();
+                candidates
+                    .iter()
+                    .map(|&c| {
+                        row[pos] = c;
+                        eval_row(row_idx, &row)
+                    })
+                    .collect()
+            };
+            let evals0 = per_row(*r0, *p0)?;
+            let evals1 = per_row(*r1, *p1)?;
+            for (i, e0) in evals0.iter().enumerate() {
+                for (j, e1) in evals1.iter().enumerate() {
+                    if i == j {
+                        continue; // 同一カードを 2 枚の Joker に割り当てることはできない
+                    }
+                    let get = |idx: usize| -> &RowEval {
+                        if idx == *r0 {
+                            e0
+                        } else if idx == *r1 {
+                            e1
+                        } else {
+                            fixed[idx].as_ref().expect("Joker なし行は評価済み")
+                        }
+                    };
+                    consider(
+                        key_of(get(0), get(1), get(2)),
+                        &[candidates[i], candidates[j]],
+                    );
+                }
+            }
+        }
+        _ => {
+            // デッキ設定の上限は Joker 2 枚(ADR 0003)。3 枚以上は未対応
+            unimplemented!("Joker {} 枚の盤面は未対応(デッキ上限は 2 枚)", slots.len())
+        }
+    }
+
+    let (_, assignment) = best.expect("候補が空になることはない(52 枚 - 盤面 13 枚 > 0)");
+    Ok(with_assignment(board, slots, &assignment))
 }
 
 fn with_assignment(board: &Board, slots: &[(usize, usize)], assignment: &[Card]) -> Board {
@@ -137,25 +229,6 @@ fn with_assignment(board: &Board, slots: &[(usize, usize)], assignment: &[Card])
     }
     let [top, middle, bottom] = rows;
     Board::new(top, middle, bottom).expect("解決候補は盤面と重複しないため常に有効")
-}
-
-/// 解決候補の優先度: ファウル回避 > ロイヤリティ合計 > 行の強さ(bottom, middle, top)。
-type SelectionKey = (bool, u32, [HandRank; 3]);
-
-fn selection_key(board: &Board, royalty: &RoyaltyTable) -> Result<SelectionKey, EvaluateError> {
-    let (top, middle, bottom) = row_hands(board)?;
-    let foul = middle < top || bottom < middle;
-    // 行の強さだけでなく実際の表のロイヤリティ合計をキーに含める。
-    // 強さと点数はおおむね同調するが、ローカルルールの表では特定役だけ
-    // 高得点になる逆転がありうるため、渡された表で測る。
-    let total = if foul {
-        0
-    } else {
-        royalty_points(Row::Top, &top, royalty)
-            + royalty_points(Row::Middle, &middle, royalty)
-            + royalty_points(Row::Bottom, &bottom, royalty)
-    };
-    Ok((!foul, total, [bottom, middle, top]))
 }
 
 fn row_hands(board: &Board) -> Result<(HandRank, HandRank, HandRank), EvaluateError> {
