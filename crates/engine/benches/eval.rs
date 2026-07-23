@@ -79,6 +79,16 @@ fn bench_joker_board(c: &mut Criterion) {
     let royalty = RoyaltyTable::standard_american();
     let fl = FantasylandRules::standard_progressive();
 
+    let no_joker = Board::new(
+        cards(&["Qs", "Qh", "3d"]),
+        cards(&["8c", "8d", "8h", "Kc", "2s"]),
+        cards(&["Ah", "Kh", "Qd", "Jh", "Th"]),
+    )
+    .unwrap();
+    c.bench_function("evaluate_board(jokerなし)", |b| {
+        b.iter(|| black_box(evaluate_board(&no_joker, &[], &royalty, &fl).unwrap()))
+    });
+
     let one_joker = Board::new(
         cards(&["Qs", "Xj", "3d"]),
         cards(&["8c", "8d", "8h", "Kc", "2s"]),

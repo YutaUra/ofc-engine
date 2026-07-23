@@ -1,7 +1,7 @@
 //! 盤面評価のエントリポイント。役 + ロイヤリティ + ファウル + FL 判定 +
 //! Joker の盤面全体最適解決を一括で返す(ADR 0003 の wire 境界に対応する層)。
 
-use crate::fantasyland::{FantasylandRules, fantasyland_entry};
+use crate::fantasyland::{FantasylandRules, entry_cards_for};
 use crate::hand::{EvalError, HandRank, evaluate_five, evaluate_three};
 use crate::joker::available_cards;
 use crate::royalty::{Row, RoyaltyTable, royalty_points};
@@ -299,8 +299,15 @@ fn evaluation_of(
     royalty: &RoyaltyTable,
     fl: &FantasylandRules,
 ) -> Result<BoardEvaluation, EvaluateError> {
+    // 行評価は 1 回だけ行い、ファウル・ロイヤリティ・FL 判定をすべて導く
     let (top, middle, bottom) = row_hands(board)?;
     let foul = middle < top || bottom < middle;
+
+    let fantasyland_cards = if foul {
+        None
+    } else {
+        entry_cards_for(&top, fl)
+    };
 
     let top = RowEvaluation {
         royalty: royalty_points(Row::Top, &top, royalty),
@@ -320,10 +327,6 @@ fn evaluation_of(
     } else {
         top.royalty + middle.royalty + bottom.royalty
     };
-    let fantasyland_cards = fantasyland_entry(board, fl).map_err(|e| match e {
-        crate::foul::FoulCheckError::IncompleteBoard => EvaluateError::IncompleteBoard,
-        crate::foul::FoulCheckError::Eval(e) => EvaluateError::Eval(e),
-    })?;
 
     Ok(BoardEvaluation {
         foul,

@@ -41,6 +41,19 @@ impl FantasylandRules {
     }
 }
 
+/// top の役から突入時の配布枚数を引く(ファウル判定は呼び出し側の責務)。
+pub(crate) fn entry_cards_for(top: &crate::hand::HandRank, rules: &FantasylandRules) -> Option<u8> {
+    match top.category {
+        Category::Trips => Some(rules.trips_cards),
+        Category::Pair => top
+            .tiebreak
+            .first()
+            .and_then(|rank| rules.pair_cards.get(rank))
+            .copied(),
+        _ => None,
+    }
+}
+
 /// FL 突入判定。突入するなら配布枚数を返す。ファウル盤面は突入しない。
 pub fn fantasyland_entry(
     board: &Board,
@@ -50,16 +63,7 @@ pub fn fantasyland_entry(
         return Ok(None);
     }
     let top = evaluate_three(board.top()).map_err(FoulCheckError::Eval)?;
-    let cards = match top.category {
-        Category::Trips => Some(rules.trips_cards),
-        Category::Pair => top
-            .tiebreak
-            .first()
-            .and_then(|rank| rules.pair_cards.get(rank))
-            .copied(),
-        _ => None,
-    };
-    Ok(cards)
+    Ok(entry_cards_for(&top, rules))
 }
 
 /// FL 継続判定。ファウル盤面は継続しない。

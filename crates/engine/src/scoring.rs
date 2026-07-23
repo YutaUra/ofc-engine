@@ -32,24 +32,42 @@ pub fn score_pair(
     }
     // 行評価は 1 盤面につき 1 回だけ行い、ファウル判定・行勝敗・ロイヤリティを
     // すべてその結果から導く(評価の重複はホットループで効くため)。
-    let rows_a = evaluate_rows(a)?;
-    let rows_b = evaluate_rows(b)?;
-    let a_foul = is_foul(&rows_a);
-    let b_foul = is_foul(&rows_b);
+    let eval_a = BoardScore::new(a, royalty)?;
+    let eval_b = BoardScore::new(b, royalty)?;
+    let points_for_a = score_from(&eval_a, &eval_b, scoring);
+    Ok((points_for_a, -points_for_a))
+}
 
-    let points_for_a = match (a_foul, b_foul) {
+/// 採点に必要な盤面ごとの評価キャッシュ(行の役・ファウル・ロイヤリティ合計)。
+struct BoardScore {
+    rows: [crate::hand::HandRank; 3],
+    foul: bool,
+    royalty: i32,
+}
+
+impl BoardScore {
+    fn new(board: &Board, table: &RoyaltyTable) -> Result<Self, FoulCheckError> {
+        let rows = evaluate_rows(board)?;
+        let foul = is_foul(&rows);
+        let royalty = if foul { 0 } else { rows_royalty(&rows, table) };
+        Ok(Self {
+            rows,
+            foul,
+            royalty,
+        })
+    }
+}
+
+fn score_from(a: &BoardScore, b: &BoardScore, scoring: &ScoringRules) -> i32 {
+    match (a.foul, b.foul) {
         (true, true) => 0,
         // ファウル側は全行負け + scoop を取られ、自分のロイヤリティは 0
-        (true, false) => {
-            -(3 * scoring.row_point + scoring.scoop_bonus + rows_royalty(&rows_b, royalty))
-        }
-        (false, true) => {
-            3 * scoring.row_point + scoring.scoop_bonus + rows_royalty(&rows_a, royalty)
-        }
+        (true, false) => -(3 * scoring.row_point + scoring.scoop_bonus + b.royalty),
+        (false, true) => 3 * scoring.row_point + scoring.scoop_bonus + a.royalty,
         (false, false) => {
             let mut wins_a = 0;
             let mut wins_b = 0;
-            for (ra, rb) in rows_a.iter().zip(&rows_b) {
+            for (ra, rb) in a.rows.iter().zip(&b.rows) {
                 match ra.cmp(rb) {
                     std::cmp::Ordering::Greater => wins_a += 1,
                     std::cmp::Ordering::Less => wins_b += 1,
@@ -63,10 +81,9 @@ pub fn score_pair(
             if wins_b == 3 {
                 points -= scoring.scoop_bonus;
             }
-            points + rows_royalty(&rows_a, royalty) - rows_royalty(&rows_b, royalty)
+            points + a.royalty - b.royalty
         }
-    };
-    Ok((points_for_a, -points_for_a))
+    }
 }
 
 /// 総当たり採点。各プレイヤーの得点は全ペア採点の和。
@@ -75,12 +92,21 @@ pub fn score_matchup(
     royalty: &RoyaltyTable,
     scoring: &ScoringRules,
 ) -> Result<Vec<i32>, FoulCheckError> {
+    // 各盤面の評価は 1 回だけ行い、ペア採点はキャッシュ同士で行う
+    // (素朴にペアごとに score_pair を呼ぶと各盤面が N-1 回評価される)。
+    if boards.iter().any(|b| !b.is_complete()) {
+        return Err(FoulCheckError::IncompleteBoard);
+    }
+    let evals: Vec<BoardScore> = boards
+        .iter()
+        .map(|b| BoardScore::new(b, royalty))
+        .collect::<Result<_, _>>()?;
     let mut totals = vec![0i32; boards.len()];
     for i in 0..boards.len() {
         for j in (i + 1)..boards.len() {
-            let (pi, pj) = score_pair(&boards[i], &boards[j], royalty, scoring)?;
-            totals[i] += pi;
-            totals[j] += pj;
+            let p = score_from(&evals[i], &evals[j], scoring);
+            totals[i] += p;
+            totals[j] -= p;
         }
     }
     Ok(totals)
