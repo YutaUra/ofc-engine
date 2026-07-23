@@ -1,0 +1,9 @@
+[toolchain]
+# chinese-poker-solver と同じ運用: nix(flake)・rustup・rust-analyzer が参照する単一の真実。
+# "stable" ではなく具体版でピンする理由: Nix の fromRustupToolchainFile で "stable" は
+# live 解決になり、flake.lock を固定しても新 stable リリースで devShell が壊れるため。
+# 上げるときは rust-toolchain.toml と flake.lock を同時に更新する。
+channel = "1.96.0"
+components = ["rustfmt", "clippy", "rust-analyzer", "rust-src"]
+# wasm 配布層(ADR 0002)のターゲット。
+targets = ["wasm32-unknown-unknown"]

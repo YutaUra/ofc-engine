@@ -1,0 +1,8 @@
+# コア crate。ADR 0002 により wasm/JS 依存を持ち込まない(配布層は別 crate)。
+[package]
+name = "ofc-engine"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
