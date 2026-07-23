@@ -19,7 +19,10 @@ pub struct Placement {
     pub row: RowKind,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// GameState ごと保存できるよう serde 対応(アプリの中断復帰用途)。
+// deck を含むため、シリアライズ結果には未公開のカード順が入ることに注意
+// (対戦相手に渡してよいデータではない。保存はローカル/サーバ秘匿領域で)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Street {
     Initial,
     /// 1..=4 の引き番。
@@ -50,7 +53,7 @@ pub enum GameError {
     Board(BoardError),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GameState {
     boards: Vec<Board>,
     deck: Vec<Card>,
