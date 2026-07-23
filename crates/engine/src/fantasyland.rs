@@ -12,13 +12,13 @@ use crate::{Board, Rank};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FantasylandRules {
     /// top のペアランク → 配布枚数。マップにないペアは突入なし。
-    pair_cards: BTreeMap<Rank, u8>,
+    pub(crate) pair_cards: BTreeMap<Rank, u8>,
     /// top トリップスでの配布枚数(ランク不問)。
-    trips_cards: u8,
+    pub(crate) trips_cards: u8,
     /// 継続条件: top トリップス。
-    stay_top_trips: bool,
+    pub(crate) stay_top_trips: bool,
     /// 継続条件: bottom クワッズ以上。
-    stay_bottom_quads_or_better: bool,
+    pub(crate) stay_bottom_quads_or_better: bool,
 }
 
 impl FantasylandRules {

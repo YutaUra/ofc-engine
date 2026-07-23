@@ -129,6 +129,26 @@ impl fmt::Display for Card {
     }
 }
 
+// wire では Rank は "2".."9","T","J","Q","K","A" の 1 文字
+// (ロイヤリティ表や FL 設定のマップキーとして使う)。
+impl serde::Serialize for Rank {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_wire().to_string())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Rank {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        let mut chars = s.chars();
+        match (chars.next(), chars.next()) {
+            (Some(c), None) => Rank::from_wire(c)
+                .ok_or_else(|| serde::de::Error::custom(format!("不正なランク表記: {s:?}"))),
+            _ => Err(serde::de::Error::custom(format!("不正なランク表記: {s:?}"))),
+        }
+    }
+}
+
 // wire では Card は "As" / "Xj" の文字列(ADR 0003)。
 impl serde::Serialize for Card {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {

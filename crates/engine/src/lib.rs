@@ -6,6 +6,7 @@ pub mod foul;
 pub mod hand;
 pub mod joker;
 pub mod royalty;
+pub mod ruleset;
 pub mod scoring;
 
 pub use board::{Board, BoardError};

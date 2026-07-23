@@ -15,10 +15,10 @@ pub enum Row {
 /// ロイヤリティ表。top はペア/トリップスのランク別、middle/bottom はカテゴリ別。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoyaltyTable {
-    top_pair: BTreeMap<Rank, u32>,
-    top_trips: BTreeMap<Rank, u32>,
-    middle: BTreeMap<Category, u32>,
-    bottom: BTreeMap<Category, u32>,
+    pub(crate) top_pair: BTreeMap<Rank, u32>,
+    pub(crate) top_trips: BTreeMap<Rank, u32>,
+    pub(crate) middle: BTreeMap<Category, u32>,
+    pub(crate) bottom: BTreeMap<Category, u32>,
 }
 
 impl RoyaltyTable {
