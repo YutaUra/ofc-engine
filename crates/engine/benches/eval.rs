@@ -1,12 +1,12 @@
 //! 役評価・Joker 解決・採点のベンチマーク。
 //! 高速化の各ステップでここの数値を比較する(結果の厳密性はテストが担保)。
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use ofc_engine::evaluate::evaluate_board;
 use ofc_engine::fantasyland::FantasylandRules;
 use ofc_engine::hand::{evaluate_five, evaluate_three};
 use ofc_engine::royalty::RoyaltyTable;
-use ofc_engine::scoring::{score_pair, ScoringRules};
+use ofc_engine::scoring::{ScoringRules, score_pair};
 use ofc_engine::{Board, Card};
 
 fn cards(wires: &[&str]) -> Vec<Card> {
