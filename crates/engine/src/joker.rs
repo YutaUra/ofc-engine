@@ -103,7 +103,7 @@ fn consider(
 }
 
 /// 52 枚から行内カードと使用済みカードを除いた解決先候補。
-fn available_cards(row: &[Card], used: &[Card]) -> Vec<Card> {
+pub(crate) fn available_cards(row: &[Card], used: &[Card]) -> Vec<Card> {
     let ranks = [
         Rank::Two,
         Rank::Three,

@@ -1,5 +1,6 @@
 pub mod board;
 pub mod card;
+pub mod evaluate;
 pub mod fantasyland;
 pub mod foul;
 pub mod hand;
