@@ -40,6 +40,23 @@ pub struct ParseCardError {
 }
 
 impl Rank {
+    /// 弱い順(Two..Ace)。enum の判別値 0..=12 と添字が一致する。
+    pub(crate) const ALL: [Rank; 13] = [
+        Rank::Two,
+        Rank::Three,
+        Rank::Four,
+        Rank::Five,
+        Rank::Six,
+        Rank::Seven,
+        Rank::Eight,
+        Rank::Nine,
+        Rank::Ten,
+        Rank::Jack,
+        Rank::Queen,
+        Rank::King,
+        Rank::Ace,
+    ];
+
     fn from_wire(c: char) -> Option<Self> {
         Some(match c {
             '2' => Rank::Two,

@@ -37,134 +37,143 @@ pub enum EvalError {
     UnresolvedJoker,
 }
 
-pub fn evaluate_five(cards: &[Card]) -> Result<HandRank, EvalError> {
-    let (ranks, suits) = resolved_ranks(cards, 5)?;
-
-    let groups = rank_groups(&ranks);
-    let is_flush = suits.windows(2).all(|w| w[0] == w[1]);
-    let straight_high = straight_high(&ranks);
-
-    let hand = match (straight_high, is_flush, groups.as_slice()) {
-        (Some(Rank::Ace), true, _) => HandRank {
-            category: Category::RoyalFlush,
-            tiebreak: vec![],
-        },
-        (Some(high), true, _) => HandRank {
-            category: Category::StraightFlush,
-            tiebreak: vec![high],
-        },
-        (_, _, [(4, quad), (1, kicker)]) => HandRank {
-            category: Category::Quads,
-            tiebreak: vec![*quad, *kicker],
-        },
-        (_, _, [(3, trips), (2, pair)]) => HandRank {
-            category: Category::FullHouse,
-            tiebreak: vec![*trips, *pair],
-        },
-        (_, true, _) => HandRank {
-            category: Category::Flush,
-            tiebreak: ranks_desc(&ranks),
-        },
-        (Some(high), false, _) => HandRank {
-            category: Category::Straight,
-            tiebreak: vec![high],
-        },
-        (_, _, [(3, trips), (1, k1), (1, k2)]) => HandRank {
-            category: Category::Trips,
-            tiebreak: vec![*trips, *k1, *k2],
-        },
-        (_, _, [(2, high_pair), (2, low_pair), (1, kicker)]) => HandRank {
-            category: Category::TwoPair,
-            tiebreak: vec![*high_pair, *low_pair, *kicker],
-        },
-        (_, _, [(2, pair), rest @ ..]) => HandRank {
-            category: Category::Pair,
-            tiebreak: std::iter::once(*pair)
-                .chain(rest.iter().map(|(_, r)| *r))
-                .collect(),
-        },
-        _ => HandRank {
-            category: Category::HighCard,
-            tiebreak: ranks_desc(&ranks),
-        },
-    };
-    Ok(hand)
+/// ランク出現数(添字 = Rank の判別値)とランク集合のビットマスク。
+/// BTreeMap やソートを使わないのは、この関数がソルバーの最内ループで
+/// 呼ばれるため(ヒープ確保とキャッシュミスを避ける)。
+struct RankProfile {
+    counts: [u8; 13],
+    mask: u16,
+    is_flush: bool,
 }
 
-pub fn evaluate_three(cards: &[Card]) -> Result<HandRank, EvalError> {
-    // top はストレート/フラッシュを役として扱わないため、ランクのグループ化のみで決まる
-    let (ranks, _) = resolved_ranks(cards, 3)?;
-    let groups = rank_groups(&ranks);
-    let hand = match groups.as_slice() {
-        [(3, trips)] => HandRank {
-            category: Category::Trips,
-            tiebreak: vec![*trips],
-        },
-        [(2, pair), (1, kicker)] => HandRank {
-            category: Category::Pair,
-            tiebreak: vec![*pair, *kicker],
-        },
-        _ => HandRank {
-            category: Category::HighCard,
-            tiebreak: ranks_desc(&ranks),
-        },
-    };
-    Ok(hand)
-}
-
-/// Joker が残っていないことを検証しつつランクとスートに分解する。
-fn resolved_ranks(
-    cards: &[Card],
-    expected: usize,
-) -> Result<(Vec<Rank>, Vec<crate::Suit>), EvalError> {
+fn profile(cards: &[Card], expected: usize) -> Result<RankProfile, EvalError> {
     if cards.len() != expected {
         return Err(EvalError::WrongCardCount {
             expected,
             actual: cards.len(),
         });
     }
-    cards
-        .iter()
-        .map(|card| match card {
-            Card::Standard { rank, suit } => Ok((*rank, *suit)),
-            Card::Joker => Err(EvalError::UnresolvedJoker),
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .map(|pairs| pairs.into_iter().unzip())
+    let mut counts = [0u8; 13];
+    let mut mask = 0u16;
+    let mut suits = 0u8;
+    for card in cards {
+        match card {
+            Card::Standard { rank, suit } => {
+                let r = *rank as usize;
+                counts[r] += 1;
+                mask |= 1 << r;
+                suits |= 1 << (*suit as u8);
+            }
+            Card::Joker => return Err(EvalError::UnresolvedJoker),
+        }
+    }
+    Ok(RankProfile {
+        counts,
+        mask,
+        is_flush: suits.count_ones() == 1,
+    })
 }
 
-/// (出現数, ランク) を出現数→ランクの降順で返す。役カテゴリはこの形で判別できる。
-fn rank_groups(ranks: &[Rank]) -> Vec<(usize, Rank)> {
-    let mut counts = std::collections::BTreeMap::new();
-    for rank in ranks {
-        *counts.entry(*rank).or_insert(0usize) += 1;
+/// 出現数 `count` のランクを強い順に tiebreak へ追加する。
+fn push_ranks(tiebreak: &mut Vec<Rank>, counts: &[u8; 13], count: u8) {
+    for r in (0..13).rev() {
+        if counts[r] == count {
+            tiebreak.push(Rank::ALL[r]);
+        }
     }
-    let mut groups: Vec<(usize, Rank)> = counts.into_iter().map(|(r, c)| (c, r)).collect();
-    groups.sort_unstable_by(|a, b| b.cmp(a));
-    groups
 }
 
-fn ranks_desc(ranks: &[Rank]) -> Vec<Rank> {
-    let mut sorted = ranks.to_vec();
-    sorted.sort_unstable_by(|a, b| b.cmp(a));
-    sorted
+pub fn evaluate_five(cards: &[Card]) -> Result<HandRank, EvalError> {
+    let p = profile(cards, 5)?;
+
+    // ストレート判定: 5 種のランクが連続しているか、ホイール(A-2-3-4-5)か
+    let straight_high = if p.mask.count_ones() == 5 {
+        const WHEEL: u16 = 0b1_0000_0000_1111; // A + 2,3,4,5
+        let low = p.mask.trailing_zeros() as usize;
+        if p.mask >> low == 0b11111 {
+            Some(Rank::ALL[low + 4])
+        } else if p.mask == WHEEL {
+            Some(Rank::Five) // ホイールは 5 ハイ扱い
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let distinct = p.mask.count_ones();
+    let max_count = *p.counts.iter().max().expect("13 要素で空にならない");
+
+    let mut tiebreak = Vec::with_capacity(5);
+    let category = match (straight_high, p.is_flush) {
+        (Some(Rank::Ace), true) => Category::RoyalFlush,
+        (Some(high), true) => {
+            tiebreak.push(high);
+            Category::StraightFlush
+        }
+        (_, true) => {
+            push_ranks(&mut tiebreak, &p.counts, 1);
+            Category::Flush
+        }
+        (Some(high), false) => {
+            tiebreak.push(high);
+            Category::Straight
+        }
+        (None, false) => match (max_count, distinct) {
+            (4, _) => {
+                push_ranks(&mut tiebreak, &p.counts, 4);
+                push_ranks(&mut tiebreak, &p.counts, 1);
+                Category::Quads
+            }
+            (3, 2) => {
+                push_ranks(&mut tiebreak, &p.counts, 3);
+                push_ranks(&mut tiebreak, &p.counts, 2);
+                Category::FullHouse
+            }
+            (3, _) => {
+                push_ranks(&mut tiebreak, &p.counts, 3);
+                push_ranks(&mut tiebreak, &p.counts, 1);
+                Category::Trips
+            }
+            (2, 3) => {
+                push_ranks(&mut tiebreak, &p.counts, 2);
+                push_ranks(&mut tiebreak, &p.counts, 1);
+                Category::TwoPair
+            }
+            (2, _) => {
+                push_ranks(&mut tiebreak, &p.counts, 2);
+                push_ranks(&mut tiebreak, &p.counts, 1);
+                Category::Pair
+            }
+            _ => {
+                push_ranks(&mut tiebreak, &p.counts, 1);
+                Category::HighCard
+            }
+        },
+    };
+    Ok(HandRank { category, tiebreak })
 }
 
-/// ストレートなら最高ランクを返す。ホイール(A-5)は 5 ハイとして扱う。
-fn straight_high(ranks: &[Rank]) -> Option<Rank> {
-    let mut sorted = ranks.to_vec();
-    sorted.sort_unstable();
-    sorted.dedup();
-    if sorted.len() != 5 {
-        return None;
-    }
-    let consecutive = sorted.windows(2).all(|w| w[1] as u8 - w[0] as u8 == 1);
-    if consecutive {
-        return Some(sorted[4]);
-    }
-    // ホイール: A,2,3,4,5。A を除いた 2..5 が連続し、最高位は 5
-    if sorted == [Rank::Two, Rank::Three, Rank::Four, Rank::Five, Rank::Ace] {
-        return Some(Rank::Five);
-    }
-    None
+pub fn evaluate_three(cards: &[Card]) -> Result<HandRank, EvalError> {
+    // top はストレート/フラッシュを役として扱わないため、ランクの出現数のみで決まる
+    let p = profile(cards, 3)?;
+    let max_count = *p.counts.iter().max().expect("13 要素で空にならない");
+
+    let mut tiebreak = Vec::with_capacity(3);
+    let category = match max_count {
+        3 => {
+            push_ranks(&mut tiebreak, &p.counts, 3);
+            Category::Trips
+        }
+        2 => {
+            push_ranks(&mut tiebreak, &p.counts, 2);
+            push_ranks(&mut tiebreak, &p.counts, 1);
+            Category::Pair
+        }
+        _ => {
+            push_ranks(&mut tiebreak, &p.counts, 1);
+            Category::HighCard
+        }
+    };
+    Ok(HandRank { category, tiebreak })
 }
