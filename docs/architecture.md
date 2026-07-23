@@ -2,7 +2,7 @@
 
 > **Stability**: 🌊 living
 > **最終更新**: 2026-07-24
-> **直近の変更 ADR**: [0002](decisions/0002-use-rust-core-with-wasm-distribution.md)(実装言語の選定)
+> **直近の変更 ADR**: [0003](decisions/0003-wire-types-and-ruleset-compilation.md)(wire 型と RuleSet 方式)
 
 実装・技術構成の現状を記す文書。自由に更新してよい。重要な決定の根拠は ADR(`docs/decisions/`)に残し、ここからリンクする。
 
@@ -18,14 +18,45 @@
 
 この構成は chinese-poker-solver で Web(wasm worker)/ React Native(WebView 内 wasm)/ Cloudflare Workers の全環境で実戦済みのパターンを踏襲する。
 
-## wire 型(最優先の設計対象)
+## wire 型(設計確定: [ADR 0003](decisions/0003-wire-types-and-ruleset-compilation.md))
 
-言語より API 境界のほうが変更困難なため、実装前に以下を設計・文書化する:
+chinese-poker-solver の現行形式と互換。境界は JSON 文字列、TS 型と serde のキー名は厳密一致させる(TS 型定義を単一真実源とする)。
 
-- 盤面表現(rows 文字列などのシリアライズ形式)
-- 役評価・ファウル判定・ロイヤリティの返り値スキーマ
+### 基本型
 
-TBD(次回更新時に決定)— 設計したらこの節に記載する。
+- **Card**: `"As"`, `"Td"`, `"2c"`(ランク大文字 1 字 + スート小文字 1 字)。Joker は `"Xj"`
+- **Board**: `{"top": Card[3], "middle": Card[5], "bottom": Card[5]}` — **段構成 3/5/5・13 枚は不変条件**(可変化するなら const generics。実行時分岐にしない)
+- 役カテゴリは安定キー(`"pair"`, `"trips"`, `"straight_flush"`, …)で返し、ローカライズは UI 側の責務
+
+### RuleSet → CompiledRules
+
+ローカルルールは `RuleSet`(JSON で完全データ化)として受ける:
+
+```json
+{
+  "variant": "pineapple",
+  "players": 2,
+  "deck": { "jokers": 1 },
+  "scoring": { "rowPoint": 1, "scoopBonus": 3 },
+  "royalties": { "top": {}, "middle": {}, "bottom": {} },
+  "foul": { "royaltyZero": true },
+  "fantasyland": {
+    "entry": { "minTop": "pair_QQ" },
+    "cards": { "pair_QQ": 14, "pair_KK": 15, "pair_AA": 16, "trips": 17 },
+    "stay": { "topTrips": true, "bottomQuadsOrBetter": true }
+  }
+}
+```
+
+- `compile(ruleset) -> CompiledRules` を init 時に 1 回呼び、検証 + lookup 表化する。評価関数は CompiledRules のみ参照(ホットループで config を読まない)
+- progressive FL は `fantasyland.cards` の役→枚数マップで表現(非 progressive は全キー同値)
+- `jokers: 0` のとき Joker 解決パスは構造的にスキップ。解決の既定セマンティクスは「盤面全体で最適(ファウル回避のため弱める解決も可)」で、解決結果は位置ベースの `jokerResolution` として返す
+- 標準ルールはプリセット関数で提供し、wire 上は常に完全展開形
+
+### エンジンの責務境界
+
+- 提供: `evaluate_board`(役 + ロイヤリティ + ファウル + FL 判定)、`score_matchup`(複数盤面の 1-6 + scoop 採点。人数は配列)
+- 非提供: FL の EV 再帰(`FantasylandValues` 相当の注入口のみ)、探索・サンプリング系入力(draw / samples / seed 等はソルバー層の型)
 
 ## 設計上の制約(charter 由来)
 
