@@ -5,3 +5,14 @@ members = ["crates/engine", "crates/engine-wasm"]
 [workspace.package]
 edition = "2024"
 license = "MIT"
+
+# ベンチ/リリースの codegen を安定化する。codegen-units 分割の偶然で
+# ホットな関数のインライン判断が変わり、無関係な変更でベンチが 2 倍以上
+# ぶれる事象が実際に起きたため 1 に固定する(ビルド時間より再現性を優先)。
+[profile.release]
+codegen-units = 1
+lto = "thin"
+
+[profile.bench]
+codegen-units = 1
+lto = "thin"

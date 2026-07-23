@@ -1,6 +1,8 @@
 //! ロイヤリティ計算。表はデータとして保持し、ローカルルールの差し替えを許す(ADR 0003)。
-
-use std::collections::BTreeMap;
+//!
+//! 内部表現は BTreeMap ではなく固定長配列(ランク/カテゴリの判別値で添字引き)。
+//! 表引きは Joker 解決やソルバーの内側で大量に呼ばれるため、ポインタ追跡の
+//! ない O(1) 参照にしている(ADR 0003 の「init 時に lookup 表へ焼く」方針)。
 
 use crate::Rank;
 use crate::hand::{Category, HandRank};
@@ -12,67 +14,47 @@ pub enum Row {
     Bottom,
 }
 
+const CATEGORY_COUNT: usize = 10;
+
 /// ロイヤリティ表。top はペア/トリップスのランク別、middle/bottom はカテゴリ別。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoyaltyTable {
-    pub(crate) top_pair: BTreeMap<Rank, u32>,
-    pub(crate) top_trips: BTreeMap<Rank, u32>,
-    pub(crate) middle: BTreeMap<Category, u32>,
-    pub(crate) bottom: BTreeMap<Category, u32>,
+    pub(crate) top_pair: [u32; 13],
+    pub(crate) top_trips: [u32; 13],
+    pub(crate) middle: [u32; CATEGORY_COUNT],
+    pub(crate) bottom: [u32; CATEGORY_COUNT],
 }
 
 impl RoyaltyTable {
     /// アメリカン標準のロイヤリティ表。
     pub fn standard_american() -> Self {
-        // top ペア: 66=1 から AA=9 まで 1 点刻み
-        let pair_ranks = [
-            Rank::Six,
-            Rank::Seven,
-            Rank::Eight,
-            Rank::Nine,
-            Rank::Ten,
-            Rank::Jack,
-            Rank::Queen,
-            Rank::King,
-            Rank::Ace,
-        ];
-        let top_pair = pair_ranks.into_iter().zip(1u32..).collect();
+        let mut top_pair = [0u32; 13];
+        // 66=1 から AA=9 まで 1 点刻み
+        for (offset, points) in (Rank::Six as usize..=Rank::Ace as usize).zip(1u32..) {
+            top_pair[offset] = points;
+        }
+        let mut top_trips = [0u32; 13];
+        // 222=10 から AAA=22 まで 1 点刻み
+        for (rank, points) in (0..13).zip(10u32..) {
+            top_trips[rank] = points;
+        }
 
-        // top トリップス: 222=10 から AAA=22 まで 1 点刻み
-        let trips_ranks = [
-            Rank::Two,
-            Rank::Three,
-            Rank::Four,
-            Rank::Five,
-            Rank::Six,
-            Rank::Seven,
-            Rank::Eight,
-            Rank::Nine,
-            Rank::Ten,
-            Rank::Jack,
-            Rank::Queen,
-            Rank::King,
-            Rank::Ace,
-        ];
-        let top_trips = trips_ranks.into_iter().zip(10u32..).collect();
+        let mut middle = [0u32; CATEGORY_COUNT];
+        middle[Category::Trips as usize] = 2;
+        middle[Category::Straight as usize] = 4;
+        middle[Category::Flush as usize] = 8;
+        middle[Category::FullHouse as usize] = 12;
+        middle[Category::Quads as usize] = 20;
+        middle[Category::StraightFlush as usize] = 30;
+        middle[Category::RoyalFlush as usize] = 50;
 
-        let middle = BTreeMap::from([
-            (Category::Trips, 2),
-            (Category::Straight, 4),
-            (Category::Flush, 8),
-            (Category::FullHouse, 12),
-            (Category::Quads, 20),
-            (Category::StraightFlush, 30),
-            (Category::RoyalFlush, 50),
-        ]);
-        let bottom = BTreeMap::from([
-            (Category::Straight, 2),
-            (Category::Flush, 4),
-            (Category::FullHouse, 6),
-            (Category::Quads, 10),
-            (Category::StraightFlush, 15),
-            (Category::RoyalFlush, 25),
-        ]);
+        let mut bottom = [0u32; CATEGORY_COUNT];
+        bottom[Category::Straight as usize] = 2;
+        bottom[Category::Flush as usize] = 4;
+        bottom[Category::FullHouse as usize] = 6;
+        bottom[Category::Quads as usize] = 10;
+        bottom[Category::StraightFlush as usize] = 15;
+        bottom[Category::RoyalFlush as usize] = 25;
 
         Self {
             top_pair,
@@ -90,7 +72,7 @@ impl RoyaltyTable {
             Row::Bottom => &mut self.bottom,
             Row::Top => unimplemented!("top はランク別体系のため専用 setter で扱う"),
         };
-        table.insert(category, points);
+        table[category as usize] = points;
     }
 }
 
@@ -104,11 +86,10 @@ pub fn royalty_points(row: Row, hand: &HandRank, table: &RoyaltyTable) -> u32 {
             };
             hand.tiebreak
                 .first()
-                .and_then(|rank| rank_table.get(rank))
-                .copied()
+                .map(|rank| rank_table[*rank as usize])
                 .unwrap_or(0)
         }
-        Row::Middle => table.middle.get(&hand.category).copied().unwrap_or(0),
-        Row::Bottom => table.bottom.get(&hand.category).copied().unwrap_or(0),
+        Row::Middle => table.middle[hand.category as usize],
+        Row::Bottom => table.bottom[hand.category as usize],
     }
 }

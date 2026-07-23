@@ -83,6 +83,21 @@ impl RuleSet {
     pub fn standard_pineapple() -> Self {
         let royalty = RoyaltyTable::standard_american();
         let fl = FantasylandRules::standard_progressive();
+        // wire 表現(マップ)には 0 点のエントリを含めない
+        let rank_map = |arr: &[u32; 13]| -> BTreeMap<Rank, u32> {
+            Rank::ALL
+                .iter()
+                .filter(|r| arr[**r as usize] > 0)
+                .map(|r| (*r, arr[*r as usize]))
+                .collect()
+        };
+        let category_map = |arr: &[u32; 10]| -> BTreeMap<Category, u32> {
+            ALL_CATEGORIES
+                .iter()
+                .filter(|c| arr[**c as usize] > 0)
+                .map(|c| (*c, arr[*c as usize]))
+                .collect()
+        };
         Self {
             variant: "pineapple".to_string(),
             players: 2,
@@ -93,11 +108,11 @@ impl RuleSet {
             },
             royalties: RoyaltiesWire {
                 top: TopRoyaltiesWire {
-                    pair: royalty.top_pair,
-                    trips: royalty.top_trips,
+                    pair: rank_map(&royalty.top_pair),
+                    trips: rank_map(&royalty.top_trips),
                 },
-                middle: royalty.middle,
-                bottom: royalty.bottom,
+                middle: category_map(&royalty.middle),
+                bottom: category_map(&royalty.bottom),
             },
             fantasyland: FantasylandWire {
                 pair_cards: fl.pair_cards,
@@ -128,10 +143,10 @@ impl RuleSet {
                 scoop_bonus: self.scoring.scoop_bonus,
             },
             royalty: RoyaltyTable {
-                top_pair: self.royalties.top.pair.clone(),
-                top_trips: self.royalties.top.trips.clone(),
-                middle: self.royalties.middle.clone(),
-                bottom: self.royalties.bottom.clone(),
+                top_pair: rank_array(&self.royalties.top.pair),
+                top_trips: rank_array(&self.royalties.top.trips),
+                middle: category_array(&self.royalties.middle),
+                bottom: category_array(&self.royalties.bottom),
             },
             fantasyland: FantasylandRules {
                 pair_cards: self.fantasyland.pair_cards.clone(),
@@ -142,3 +157,33 @@ impl RuleSet {
         })
     }
 }
+
+fn rank_array(map: &BTreeMap<Rank, u32>) -> [u32; 13] {
+    let mut arr = [0u32; 13];
+    for (rank, points) in map {
+        arr[*rank as usize] = *points;
+    }
+    arr
+}
+
+fn category_array(map: &BTreeMap<Category, u32>) -> [u32; 10] {
+    let mut arr = [0u32; 10];
+    for (category, points) in map {
+        arr[*category as usize] = *points;
+    }
+    arr
+}
+
+/// 判別値順(弱い順)。配列添字との対応を保つ。
+const ALL_CATEGORIES: [Category; 10] = [
+    Category::HighCard,
+    Category::Pair,
+    Category::TwoPair,
+    Category::Trips,
+    Category::Straight,
+    Category::Flush,
+    Category::FullHouse,
+    Category::Quads,
+    Category::StraightFlush,
+    Category::RoyalFlush,
+];
