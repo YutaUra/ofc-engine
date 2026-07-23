@@ -6,14 +6,16 @@
 use crate::board::BoardError;
 use crate::{Board, Card, Rank, Suit};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// wire では "top"/"middle"/"bottom"(JSON 文字列 API から着手を受けるため)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RowKind {
     Top,
     Middle,
     Bottom,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Placement {
     pub card: Card,
     pub row: RowKind,
@@ -109,6 +111,11 @@ impl GameState {
 
     pub fn board(&self, player: usize) -> &Board {
         &self.boards[player]
+    }
+
+    /// 全プレイヤーの盤面(手番順)。
+    pub fn boards(&self) -> &[Board] {
+        &self.boards
     }
 
     /// 手番プレイヤーの配置(+捨て札)を適用し、次の手番に進める。

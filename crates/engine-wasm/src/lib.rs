@@ -114,3 +114,111 @@ fn to_json<T: Serialize>(result: Result<T, String>) -> String {
     };
     json.unwrap_or_else(|e| format!(r#"{{"error":"serialization failed: {e}"}}"#))
 }
+
+// ---- ゲーム進行(GameState)の JSON 文字列 API ----
+// state はオペークな JSON 文字列として返し、利用側はそのまま保存・再投入する
+// (中断復帰用途。deck = 未公開のカード順を含むため相手には渡さないこと)。
+// UI 向けの読み取りは view として毎回添える。
+
+use ofc_engine::game::{GameState, Placement};
+
+#[derive(Serialize)]
+struct GameOut {
+    state: String,
+    view: GameView,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GameView {
+    current_player: usize,
+    street: StreetView,
+    dealt_cards: Vec<Card>,
+    boards: Vec<Board>,
+}
+
+#[derive(Serialize)]
+struct StreetView {
+    phase: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    number: Option<u8>,
+}
+
+/// ゲームを開始する。seed は文字列で受ける(JS の number は u64 を安全に
+/// 表現できないため。BigInt でも数値でも toString して渡せばよい)。
+#[wasm_bindgen]
+pub fn game_new_json(players: u8, jokers: u8, seed: &str) -> String {
+    to_json(game_new_impl(players, jokers, seed))
+}
+
+/// 着手を適用する。placements は [{card, row}] の配列、discard は Card か null。
+#[wasm_bindgen]
+pub fn game_apply_json(state_json: &str, placements_json: &str, discard_json: &str) -> String {
+    to_json(game_apply_impl(state_json, placements_json, discard_json))
+}
+
+/// 保存済み state から view を再構築する(中断復帰)。
+#[wasm_bindgen]
+pub fn game_view_json(state_json: &str) -> String {
+    to_json(parse_state(state_json).map(|state| view_of(&state)))
+}
+
+fn game_new_impl(players: u8, jokers: u8, seed: &str) -> Result<GameOut, String> {
+    let seed: u64 = seed
+        .trim()
+        .parse()
+        .map_err(|_| format!("seed: 数値文字列ではありません: {seed:?}"))?;
+    let state = GameState::new(players, jokers, seed).map_err(|e| format!("{e:?}"))?;
+    game_out(&state)
+}
+
+fn game_apply_impl(
+    state_json: &str,
+    placements_json: &str,
+    discard_json: &str,
+) -> Result<GameOut, String> {
+    let mut state = parse_state(state_json)?;
+    let placements: Vec<Placement> =
+        serde_json::from_str(placements_json).map_err(|e| format!("placements: {e}"))?;
+    let discard: Option<Card> =
+        serde_json::from_str(discard_json).map_err(|e| format!("discard: {e}"))?;
+    state
+        .apply(&placements, discard)
+        .map_err(|e| format!("{e:?}"))?;
+    game_out(&state)
+}
+
+fn parse_state(state_json: &str) -> Result<GameState, String> {
+    serde_json::from_str(state_json).map_err(|e| format!("state: {e}"))
+}
+
+fn game_out(state: &GameState) -> Result<GameOut, String> {
+    Ok(GameOut {
+        state: serde_json::to_string(state).map_err(|e| format!("state: {e}"))?,
+        view: view_of(state),
+    })
+}
+
+fn view_of(state: &GameState) -> GameView {
+    use ofc_engine::game::Street;
+    let street = match state.street() {
+        Street::Initial => StreetView {
+            phase: "initial",
+            number: None,
+        },
+        Street::Draw(n) => StreetView {
+            phase: "draw",
+            number: Some(n),
+        },
+        Street::Finished => StreetView {
+            phase: "finished",
+            number: None,
+        },
+    };
+    GameView {
+        current_player: state.current_player(),
+        street,
+        dealt_cards: state.dealt_cards().to_vec(),
+        boards: state.boards().to_vec(),
+    }
+}

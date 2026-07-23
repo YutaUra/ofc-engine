@@ -95,3 +95,43 @@ export type ScoreMatchupResult = MatchupResult | EngineError;
 export function isEngineError(result: unknown): result is EngineError {
   return typeof result === "object" && result !== null && "error" in result;
 }
+
+// ---- ゲーム進行(GameState)API ----
+
+/** 段の指定。 */
+export type RowKind = "top" | "middle" | "bottom";
+
+/** 着手 1 枚分。 */
+export interface GamePlacement {
+  card: Card;
+  row: RowKind;
+}
+
+export interface StreetView {
+  phase: "initial" | "draw" | "finished";
+  /** phase === "draw" のときの街番号(1..4)。 */
+  number?: number;
+}
+
+/** UI 向けの現在状態。 */
+export interface GameView {
+  currentPlayer: number;
+  street: StreetView;
+  dealtCards: Card[];
+  boards: Board[];
+}
+
+/**
+ * ゲーム状態のオペークな保存用文字列。中身に依存せず、そのまま保存して
+ * newGame / applyMove の返り値から次の呼び出しへ渡す。
+ * 未公開のカード順(deck)を含むため、対戦相手に渡してはならない。
+ */
+export type GameStateBlob = string;
+
+export interface GameResult {
+  state: GameStateBlob;
+  view: GameView;
+}
+
+export type GameApiResult = GameResult | EngineError;
+export type GameViewResult = GameView | EngineError;

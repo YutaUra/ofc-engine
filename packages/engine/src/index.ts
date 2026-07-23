@@ -5,6 +5,9 @@
 
 import init, {
   evaluate_board_json,
+  game_apply_json,
+  game_new_json,
+  game_view_json,
   score_matchup_json,
   standard_ruleset_json,
   type InitInput,
@@ -13,6 +16,10 @@ import type {
   Board,
   Card,
   EvaluateBoardResult,
+  GameApiResult,
+  GamePlacement,
+  GameStateBlob,
+  GameViewResult,
   RuleSet,
   ScoreMatchupResult,
 } from "./types.ts";
@@ -26,6 +33,16 @@ export interface Engine {
   evaluateBoard(board: Board, used: Card[], ruleset: RuleSet): EvaluateBoardResult;
   /** 総当たり採点(1-6 + scoop + ロイヤリティ差分)。 */
   scoreMatchup(boards: Board[], ruleset: RuleSet): ScoreMatchupResult;
+  /** ゲーム開始。seed は number/bigint/string いずれでも可(内部で文字列化)。 */
+  newGame(players: number, jokers: number, seed: number | bigint | string): GameApiResult;
+  /** 着手適用。初手は discard を null に、街では捨て札 1 枚を渡す。 */
+  applyMove(
+    state: GameStateBlob,
+    placements: GamePlacement[],
+    discard: Card | null,
+  ): GameApiResult;
+  /** 保存済み state から現在状態を再構築する(中断復帰)。 */
+  gameView(state: GameStateBlob): GameViewResult;
 }
 
 /**
@@ -49,5 +66,12 @@ export async function createEngine(wasmInput?: InitInput): Promise<Engine> {
       JSON.parse(
         score_matchup_json(JSON.stringify(boards), JSON.stringify(ruleset)),
       ) as ScoreMatchupResult,
+    newGame: (players, jokers, seed) =>
+      JSON.parse(game_new_json(players, jokers, String(seed))) as GameApiResult,
+    applyMove: (state, placements, discard) =>
+      JSON.parse(
+        game_apply_json(state, JSON.stringify(placements), JSON.stringify(discard)),
+      ) as GameApiResult,
+    gameView: (state) => JSON.parse(game_view_json(state)) as GameViewResult,
   };
 }
