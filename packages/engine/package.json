@@ -3,16 +3,29 @@
   "version": "0.1.0",
   "description": "OFC ポーカーのコアロジックエンジン(Rust/wasm)の薄い TS クライアント",
   "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/YutaUra/ofc-engine.git",
+    "directory": "packages/engine"
+  },
   "exports": {
-    ".": "./src/index.ts",
-    "./types": "./src/types.ts"
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "default": "./dist/src/index.js"
+    },
+    "./types": {
+      "types": "./dist/src/types.d.ts",
+      "default": "./dist/src/types.js"
+    }
   },
   "files": [
-    "src",
-    "wasm"
+    "dist"
   ],
   "scripts": {
     "build:wasm": "wasm-pack build ../../crates/engine-wasm --target web --out-dir ../../packages/engine/wasm --out-name ofc_engine",
-    "typecheck": "tsc --noEmit"
+    "build": "npm run build:wasm && tsc -p tsconfig.build.json && cp -R wasm dist/wasm && rm dist/wasm/.gitignore",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
   }
 }
