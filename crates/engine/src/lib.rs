@@ -3,6 +3,7 @@ pub mod card;
 pub mod evaluate;
 pub mod fantasyland;
 pub mod foul;
+pub mod game;
 pub mod hand;
 pub mod joker;
 pub mod royalty;
