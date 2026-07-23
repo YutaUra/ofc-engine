@@ -27,19 +27,26 @@ pub fn score_pair(
     royalty: &RoyaltyTable,
     scoring: &ScoringRules,
 ) -> Result<(i32, i32), FoulCheckError> {
-    let a_foul = crate::foul::check_foul(a)?;
-    let b_foul = crate::foul::check_foul(b)?;
+    if !a.is_complete() || !b.is_complete() {
+        return Err(FoulCheckError::IncompleteBoard);
+    }
+    // 行評価は 1 盤面につき 1 回だけ行い、ファウル判定・行勝敗・ロイヤリティを
+    // すべてその結果から導く(評価の重複はホットループで効くため)。
+    let rows_a = evaluate_rows(a)?;
+    let rows_b = evaluate_rows(b)?;
+    let a_foul = is_foul(&rows_a);
+    let b_foul = is_foul(&rows_b);
 
     let points_for_a = match (a_foul, b_foul) {
         (true, true) => 0,
         // ファウル側は全行負け + scoop を取られ、自分のロイヤリティは 0
         (true, false) => {
-            -(3 * scoring.row_point + scoring.scoop_bonus + total_royalty(b, royalty)?)
+            -(3 * scoring.row_point + scoring.scoop_bonus + rows_royalty(&rows_b, royalty))
         }
-        (false, true) => 3 * scoring.row_point + scoring.scoop_bonus + total_royalty(a, royalty)?,
+        (false, true) => {
+            3 * scoring.row_point + scoring.scoop_bonus + rows_royalty(&rows_a, royalty)
+        }
         (false, false) => {
-            let rows_a = evaluate_rows(a)?;
-            let rows_b = evaluate_rows(b)?;
             let mut wins_a = 0;
             let mut wins_b = 0;
             for (ra, rb) in rows_a.iter().zip(&rows_b) {
@@ -56,7 +63,7 @@ pub fn score_pair(
             if wins_b == 3 {
                 points -= scoring.scoop_bonus;
             }
-            points + total_royalty(a, royalty)? - total_royalty(b, royalty)?
+            points + rows_royalty(&rows_a, royalty) - rows_royalty(&rows_b, royalty)
         }
     };
     Ok((points_for_a, -points_for_a))
@@ -87,10 +94,16 @@ fn evaluate_rows(board: &Board) -> Result<[crate::hand::HandRank; 3], FoulCheckE
     ])
 }
 
-fn total_royalty(board: &Board, table: &RoyaltyTable) -> Result<i32, FoulCheckError> {
+/// 行評価は [top, middle, bottom] の順(evaluate_rows と一致させること)。
+fn is_foul(rows: &[crate::hand::HandRank; 3]) -> bool {
+    let [top, middle, bottom] = rows;
+    middle < top || bottom < middle
+}
+
+fn rows_royalty(rows: &[crate::hand::HandRank; 3], table: &RoyaltyTable) -> i32 {
     use crate::royalty::{Row, royalty_points};
-    let [top, middle, bottom] = evaluate_rows(board)?;
-    Ok((royalty_points(Row::Top, &top, table)
-        + royalty_points(Row::Middle, &middle, table)
-        + royalty_points(Row::Bottom, &bottom, table)) as i32)
+    let [top, middle, bottom] = rows;
+    (royalty_points(Row::Top, top, table)
+        + royalty_points(Row::Middle, middle, table)
+        + royalty_points(Row::Bottom, bottom, table)) as i32
 }
