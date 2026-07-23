@@ -88,7 +88,7 @@ pub fn evaluate_five(cards: &[Card]) -> Result<HandRank, EvalError> {
 
     // ストレート判定: 5 種のランクが連続しているか、ホイール(A-2-3-4-5)か
     let straight_high = if p.mask.count_ones() == 5 {
-        const WHEEL: u16 = 0b1_0000_0000_1111; // A + 2,3,4,5
+        const WHEEL: u16 = 0b0001_0000_0000_1111; // A + 2,3,4,5
         let low = p.mask.trailing_zeros() as usize;
         if p.mask >> low == 0b11111 {
             Some(Rank::ALL[low + 4])

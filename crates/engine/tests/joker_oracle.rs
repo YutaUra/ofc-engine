@@ -161,7 +161,7 @@ fn assert_matches_reference(board: &Board) {
 
 #[test]
 fn ジョーカー1枚のランダム盤面100個で参照実装と一致する() {
-    let mut rng = Rng(0x1AB0_701);
+    let mut rng = Rng(0x01AB_0701);
     for _ in 0..100 {
         assert_matches_reference(&random_board(&mut rng, 1));
     }
@@ -169,7 +169,7 @@ fn ジョーカー1枚のランダム盤面100個で参照実装と一致する(
 
 #[test]
 fn ジョーカー2枚のランダム盤面30個で参照実装と一致する() {
-    let mut rng = Rng(0x2AB0_702);
+    let mut rng = Rng(0x02AB_0702);
     for _ in 0..30 {
         assert_matches_reference(&random_board(&mut rng, 2));
     }
@@ -177,7 +177,7 @@ fn ジョーカー2枚のランダム盤面30個で参照実装と一致する()
 
 #[test]
 fn ジョーカーなしのランダム盤面100個でも一致する() {
-    let mut rng = Rng(0x3AB0_703);
+    let mut rng = Rng(0x03AB_0703);
     for _ in 0..100 {
         assert_matches_reference(&random_board(&mut rng, 0));
     }
