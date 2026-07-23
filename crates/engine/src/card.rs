@@ -128,3 +128,19 @@ impl fmt::Display for Card {
         }
     }
 }
+
+// wire では Card は "As" / "Xj" の文字列(ADR 0003)。
+impl serde::Serialize for Card {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Card {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        s.parse().map_err(|e: ParseCardError| {
+            serde::de::Error::custom(format!("不正なカード表記: {:?}", e.input))
+        })
+    }
+}

@@ -5,7 +5,10 @@ use crate::{Card, Rank};
 /// 役カテゴリ。wire では安定キー(`"straight_flush"` 等)として渡す(ADR 0003)。
 /// RoyalFlush を独立カテゴリにする理由: ロイヤリティ表で
 /// ストレートフラッシュと点が異なり、表引きのキーとして区別が必要なため。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum Category {
     HighCard,
     Pair,

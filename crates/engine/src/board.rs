@@ -6,11 +6,39 @@ pub const TOP_SIZE: usize = 3;
 pub const MIDDLE_SIZE: usize = 5;
 pub const BOTTOM_SIZE: usize = 5;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+// wire では {top, middle, bottom} の rows 形式(ADR 0003)。
+// デシリアライズ時も Board::new の不変条件検証を通す。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "BoardWire", into = "BoardWire")]
 pub struct Board {
     top: Vec<Card>,
     middle: Vec<Card>,
     bottom: Vec<Card>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct BoardWire {
+    top: Vec<Card>,
+    middle: Vec<Card>,
+    bottom: Vec<Card>,
+}
+
+impl TryFrom<BoardWire> for Board {
+    type Error = String;
+
+    fn try_from(wire: BoardWire) -> Result<Self, Self::Error> {
+        Board::new(wire.top, wire.middle, wire.bottom).map_err(|e| format!("{e:?}"))
+    }
+}
+
+impl From<Board> for BoardWire {
+    fn from(board: Board) -> Self {
+        Self {
+            top: board.top,
+            middle: board.middle,
+            bottom: board.bottom,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
