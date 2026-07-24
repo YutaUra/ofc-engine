@@ -44,14 +44,17 @@ const ROW_LIMITS: [usize; 3] = [3, 5, 5];
 /// 現在の手番の着手を選ぶ(完走後は None)。
 /// 同じ入力には常に同じ手を返す(候補の列挙順を固定し、真に上回る候補
 /// だけで最良を更新するため)。
+/// 1 手分の着手(配置列と捨て札)。
+pub type Move = (Vec<Placement>, Option<Card>);
+
 pub fn choose_move(
     board: &Board,
     dealt: &[Card],
     street: Street,
     config: &CpuConfig,
-) -> Option<(Vec<Placement>, Option<Card>)> {
+) -> Option<Move> {
     let exact = street == Street::Draw(4);
-    let mut best: Option<(MoveScore, (Vec<Placement>, Option<Card>))> = None;
+    let mut best: Option<(MoveScore, Move)> = None;
 
     for candidate in enumerate_moves(board, dealt, street)? {
         let score = score_move(board, &candidate, exact, config);
@@ -69,11 +72,7 @@ enum MoveScore {
     Exact(bool, u32, [HandRank; 3]),
 }
 
-fn enumerate_moves(
-    board: &Board,
-    dealt: &[Card],
-    street: Street,
-) -> Option<Vec<(Vec<Placement>, Option<Card>)>> {
+fn enumerate_moves(board: &Board, dealt: &[Card], street: Street) -> Option<Vec<Move>> {
     let capacity = [
         3 - board.top().len(),
         5 - board.middle().len(),
@@ -133,12 +132,7 @@ fn assignments(cards: &[Card], capacity: &[usize; 3]) -> Vec<Vec<Placement>> {
     result
 }
 
-fn score_move(
-    board: &Board,
-    (placements, _): &(Vec<Placement>, Option<Card>),
-    exact: bool,
-    config: &CpuConfig,
-) -> MoveScore {
+fn score_move(board: &Board, (placements, _): &Move, exact: bool, config: &CpuConfig) -> MoveScore {
     let mut rows = [
         board.top().to_vec(),
         board.middle().to_vec(),
@@ -329,7 +323,7 @@ fn fl_setup_bonus(top: &[Card]) -> i64 {
         bonus = bonus.max(80);
     }
     let paired_with_joker =
-        best_paired_rank.or_else(|| (jokers >= 1).then(|| best_single_rank).flatten());
+        best_paired_rank.or_else(|| (jokers >= 1).then_some(best_single_rank).flatten());
     if let Some(rank) = paired_with_joker
         && rank >= Rank::Queen as usize
         && (counts[rank] >= 2 || jokers >= 1)
