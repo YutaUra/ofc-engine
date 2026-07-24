@@ -214,6 +214,69 @@ impl GameState {
     }
 }
 
+/// 現在の手番に対するランダムな合法手を返す(完走後は None)。
+/// CPU の土台・デバッグ・シミュレーション用。seed 固定で決定的。
+pub fn random_move(state: &GameState, seed: u64) -> Option<(Vec<Placement>, Option<Card>)> {
+    let mut rng = Xorshift::new(seed);
+    let mut dealt = state.dealt_cards().to_vec();
+
+    let board = state.board(state.current_player());
+    let mut capacity = [
+        (RowKind::Top, 3 - board.top().len()),
+        (RowKind::Middle, 5 - board.middle().len()),
+        (RowKind::Bottom, 5 - board.bottom().len()),
+    ];
+
+    let discard = match state.street() {
+        Street::Finished => return None,
+        Street::Initial => None,
+        Street::Draw(_) => {
+            let i = (rng.next() % dealt.len() as u64) as usize;
+            Some(dealt.swap_remove(i))
+        }
+    };
+
+    let placements = dealt
+        .into_iter()
+        .map(|card| {
+            // 空きのある行から一様に選ぶ(空きスロット数で重み付け)
+            let open: usize = capacity.iter().map(|(_, n)| n).sum();
+            let mut pick = (rng.next() % open as u64) as usize;
+            let slot = capacity
+                .iter_mut()
+                .find(|(_, n)| {
+                    if pick < *n {
+                        true
+                    } else {
+                        pick -= *n;
+                        false
+                    }
+                })
+                .expect("空きスロット数の合計から選んでいるため必ず見つかる");
+            slot.1 -= 1;
+            Placement { card, row: slot.0 }
+        })
+        .collect();
+
+    Some((placements, discard))
+}
+
+/// 決定的な乱数(shuffle と同系)。seed=0 でも縮退しないよう定数を混ぜる。
+struct Xorshift(u64);
+
+impl Xorshift {
+    fn new(seed: u64) -> Self {
+        Self(seed.wrapping_add(0x9E37_79B9_7F4A_7C15))
+    }
+
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+}
+
 fn full_deck(jokers: u8) -> Vec<Card> {
     let ranks = [
         Rank::Two,
