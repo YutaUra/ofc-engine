@@ -79,7 +79,9 @@ fn enumerate_moves(board: &Board, dealt: &[Card], street: Street) -> Option<Vec<
         5 - board.bottom().len(),
     ];
     match street {
-        Street::Finished => None,
+        // FL の一括配置(13 枚 + 複数捨て札)は探索空間が別次元のため
+        // v1 では未対応(None)。必要になったら専用の方策を実装する
+        Street::Finished | Street::Fantasyland => None,
         Street::Initial => Some(
             assignments(dealt, &capacity)
                 .into_iter()

@@ -120,3 +120,48 @@ fn 街では捨て札が必要でviewのstreetが進む() {
     assert!(parsed["error"].is_null(), "{out}");
     assert_eq!(parsed["view"]["currentPlayer"], 1);
 }
+
+#[test]
+fn flゲームは一括配置で完了しviewにflフェーズが出る() {
+    use ofc_engine_wasm::game_new_fl_json;
+    let out = game_new_fl_json(2, 0, "7", "[14, 0]");
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(
+        parsed["view"]["street"],
+        serde_json::json!({ "phase": "fantasyland" })
+    );
+    let dealt: Vec<String> = parsed["view"]["dealtCards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(dealt.len(), 14);
+
+    // 先頭 13 枚を bottom5/middle5/top3 に配置し、残り 1 枚を配列で捨てる
+    let mut placements = Vec::new();
+    for (i, card) in dealt.iter().take(13).enumerate() {
+        let row = if i < 5 {
+            "bottom"
+        } else if i < 10 {
+            "middle"
+        } else {
+            "top"
+        };
+        placements.push(serde_json::json!({ "card": card, "row": row }));
+    }
+    let state = parsed["state"].as_str().unwrap();
+    let out = ofc_engine_wasm::game_apply_json(
+        state,
+        &serde_json::Value::Array(placements).to_string(),
+        &serde_json::json!([dealt[13]]).to_string(),
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert!(parsed["error"].is_null(), "{out}");
+    // 次は通常プレイヤーの initial
+    assert_eq!(parsed["view"]["currentPlayer"], 1);
+    assert_eq!(
+        parsed["view"]["street"],
+        serde_json::json!({ "phase": "initial" })
+    );
+}

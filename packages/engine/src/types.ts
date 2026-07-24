@@ -108,7 +108,7 @@ export interface GamePlacement {
 }
 
 export interface StreetView {
-  phase: "initial" | "draw" | "finished";
+  phase: "initial" | "draw" | "fantasyland" | "finished";
   /** phase === "draw" のときの街番号(1..4)。 */
   number?: number;
 }

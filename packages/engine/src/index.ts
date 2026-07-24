@@ -6,6 +6,7 @@
 import init, {
   evaluate_board_json,
   game_apply_json,
+  game_new_fl_json,
   game_new_json,
   game_view_json,
   score_matchup_json,
@@ -35,11 +36,25 @@ export interface Engine {
   scoreMatchup(boards: Board[], ruleset: RuleSet): ScoreMatchupResult;
   /** ゲーム開始。seed は number/bigint/string いずれでも可(内部で文字列化)。 */
   newGame(players: number, jokers: number, seed: number | bigint | string): GameApiResult;
-  /** 着手適用。初手は discard を null に、街では捨て札 1 枚を渡す。 */
+  /**
+   * FL ハンドを含むゲームを開始する。flCards はプレイヤーごとの FL 配布枚数
+   * (0 = 通常。例 [14, 0])。FL プレイヤーは 13 枚配置 + 残りを Card[] で
+   * 捨てる 1 回の applyMove で完了する。
+   */
+  newFantasylandGame(
+    players: number,
+    jokers: number,
+    seed: number | bigint | string,
+    flCards: number[],
+  ): GameApiResult;
+  /**
+   * 着手適用。初手は discard を null、街では Card 1 枚、FL 手番では
+   * Card[](残り全部)を渡す。
+   */
   applyMove(
     state: GameStateBlob,
     placements: GamePlacement[],
-    discard: Card | null,
+    discard: Card | Card[] | null,
   ): GameApiResult;
   /** 保存済み state から現在状態を再構築する(中断復帰)。 */
   gameView(state: GameStateBlob): GameViewResult;
@@ -68,6 +83,10 @@ export async function createEngine(wasmInput?: InitInput): Promise<Engine> {
       ) as ScoreMatchupResult,
     newGame: (players, jokers, seed) =>
       JSON.parse(game_new_json(players, jokers, String(seed))) as GameApiResult,
+    newFantasylandGame: (players, jokers, seed, flCards) =>
+      JSON.parse(
+        game_new_fl_json(players, jokers, String(seed), JSON.stringify(flCards)),
+      ) as GameApiResult,
     applyMove: (state, placements, discard) =>
       JSON.parse(
         game_apply_json(state, JSON.stringify(placements), JSON.stringify(discard)),

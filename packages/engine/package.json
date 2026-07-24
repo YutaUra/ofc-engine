@@ -1,6 +1,6 @@
 {
   "name": "ofc-engine",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "OFC ポーカーのコアロジックエンジン(Rust/wasm)の薄い TS クライアント",
   "type": "module",
   "license": "MIT",
@@ -17,7 +17,8 @@
     "./types": {
       "types": "./dist/src/types.d.ts",
       "default": "./dist/src/types.js"
-    }
+    },
+    "./dist/wasm/*": "./dist/wasm/*"
   },
   "files": [
     "dist"

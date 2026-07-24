@@ -148,7 +148,14 @@ struct StreetView {
 /// 表現できないため。BigInt でも数値でも toString して渡せばよい)。
 #[wasm_bindgen]
 pub fn game_new_json(players: u8, jokers: u8, seed: &str) -> String {
-    to_json(game_new_impl(players, jokers, seed))
+    to_json(game_new_impl(players, jokers, seed, None))
+}
+
+/// FL ハンドを含むゲームを開始する。fl_cards はプレイヤーごとの FL 配布枚数
+/// の JSON 配列(0 = 通常。例: [14, 0])。
+#[wasm_bindgen]
+pub fn game_new_fl_json(players: u8, jokers: u8, seed: &str, fl_cards_json: &str) -> String {
+    to_json(game_new_impl(players, jokers, seed, Some(fl_cards_json)))
 }
 
 /// 着手を適用する。placements は [{card, row}] の配列、discard は Card か null。
@@ -163,13 +170,34 @@ pub fn game_view_json(state_json: &str) -> String {
     to_json(parse_state(state_json).map(|state| view_of(&state)))
 }
 
-fn game_new_impl(players: u8, jokers: u8, seed: &str) -> Result<GameOut, String> {
+fn game_new_impl(
+    players: u8,
+    jokers: u8,
+    seed: &str,
+    fl_cards_json: Option<&str>,
+) -> Result<GameOut, String> {
     let seed: u64 = seed
         .trim()
         .parse()
         .map_err(|_| format!("seed: 数値文字列ではありません: {seed:?}"))?;
-    let state = GameState::new(players, jokers, seed).map_err(|e| format!("{e:?}"))?;
+    let state = match fl_cards_json {
+        None => GameState::new(players, jokers, seed),
+        Some(json) => {
+            let fl_cards: Vec<u8> =
+                serde_json::from_str(json).map_err(|e| format!("flCards: {e}"))?;
+            GameState::new_with_fantasyland(players, jokers, seed, &fl_cards)
+        }
+    }
+    .map_err(|e| format!("{e:?}"))?;
     game_out(&state)
+}
+
+/// discard は後方互換のため Card 単体・null・Card 配列のすべてを受ける。
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum DiscardWire {
+    One(Option<Card>),
+    Many(Vec<Card>),
 }
 
 fn game_apply_impl(
@@ -180,11 +208,23 @@ fn game_apply_impl(
     let mut state = parse_state(state_json)?;
     let placements: Vec<Placement> =
         serde_json::from_str(placements_json).map_err(|e| format!("placements: {e}"))?;
-    let discard: Option<Card> =
+    let discard: DiscardWire =
         serde_json::from_str(discard_json).map_err(|e| format!("discard: {e}"))?;
-    state
-        .apply(&placements, discard)
-        .map_err(|e| format!("{e:?}"))?;
+    let discards: Vec<Card> = match discard {
+        DiscardWire::One(None) => vec![],
+        DiscardWire::One(Some(card)) => vec![card],
+        DiscardWire::Many(cards) => cards,
+    };
+    use ofc_engine::game::Street;
+    if state.street() == Street::Fantasyland {
+        state
+            .apply_fantasyland(&placements, &discards)
+            .map_err(|e| format!("{e:?}"))?;
+    } else {
+        state
+            .apply(&placements, discards.first().copied())
+            .map_err(|e| format!("{e:?}"))?;
+    }
     game_out(&state)
 }
 
@@ -204,6 +244,10 @@ fn view_of(state: &GameState) -> GameView {
     let street = match state.street() {
         Street::Initial => StreetView {
             phase: "initial",
+            number: None,
+        },
+        Street::Fantasyland => StreetView {
+            phase: "fantasyland",
             number: None,
         },
         Street::Draw(n) => StreetView {
