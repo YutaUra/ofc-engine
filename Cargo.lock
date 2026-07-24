@@ -282,6 +282,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ofc-engine-cpu"
+version = "0.1.0"
+dependencies = [
+ "ofc-engine",
+]
+
+[[package]]
 name = "ofc-engine-wasm"
 version = "0.1.0"
 dependencies = [

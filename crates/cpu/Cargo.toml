@@ -1,0 +1,11 @@
+# CPU プレイヤー(着手選択)。エンジン本体から分離する理由:
+# 着手選択は「正解が一意でないヒューリスティック」であり、決定的な
+# ルール判定を提供するコア crate と品質保証の性質が異なるため(charter)。
+[package]
+name = "ofc-engine-cpu"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ofc-engine = { path = "../engine" }
