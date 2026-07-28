@@ -37,4 +37,8 @@ jobs:
 
       - name: npm publish
         working-directory: packages/engine
-        run: npm publish --access public
+        # --ignore-scripts: prepublishOnly の再ビルドを抑止する。ビルドは
+        # 前ステップ(nix devShell)で完了しており、このステップは devShell の
+        # 外なので wasm-pack が無い。prepublishOnly はローカル手動 publish の
+        # 安全弁として残す
+        run: npm publish --access public --ignore-scripts
