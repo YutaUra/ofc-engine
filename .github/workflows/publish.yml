@@ -1,0 +1,40 @@
+# npm への自動 publish(Trusted Publishing / OIDC)。
+# v* タグの push で発火する。トークンや OTP は不要 —
+# npmjs.com 側でこのリポジトリ + このワークフローを Trusted Publisher に
+# 登録しておくと、OIDC で認証されて publish できる(初回のみ Web で設定)。
+name: publish
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  # Trusted Publishing の OIDC トークン発行に必須
+  id-token: write
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # ビルドツール(rust toolchain / wasm-pack / tsc)は flake に一元化
+      # されているので、CI でも同じ devShell を使う
+      - uses: DeterminateSystems/nix-installer-action@v16
+
+      - name: テストとビルド
+        run: |
+          nix develop --command cargo test --release
+          nix develop --command bash -c 'cd packages/engine && npm run build && npx tsc --noEmit'
+
+      # Trusted Publishing は npm 11.5.1+ が必要。nix の nodejs より新しい
+      # npm を使うため、publish だけ setup-node の Node 24(npm 11 同梱)で行う
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: npm publish
+        working-directory: packages/engine
+        run: npm publish --access public
