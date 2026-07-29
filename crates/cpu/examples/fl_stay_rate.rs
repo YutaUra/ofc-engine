@@ -1,7 +1,8 @@
 //! FL 継続率の診断: 枚数別に「継続可能な配置が存在する率」と
-//! 「完全解が実際に継続を選ぶ率」を測る。
-//! `cargo run --release -p ofc-engine-cpu --example fl_stay_rate`
+//! 「完全解が実際に継続を選ぶ率」を測る。デッキはジョーカー 2 枚入り
+//! (チャイポ標準)。`cargo run --release -p ofc-engine-cpu --example fl_stay_rate`
 
+use ofc_engine::evaluate::evaluate_board;
 use ofc_engine::fantasyland::fantasyland_stay;
 use ofc_engine::game::RowKind;
 use ofc_engine::{Board, Card, Rank, Suit};
@@ -23,6 +24,8 @@ fn random_hand(rng: &mut Rng, n: usize) -> Vec<Card> {
         .iter()
         .flat_map(|r| suits.map(|s| Card::Standard { rank: *r, suit: s }))
         .collect();
+    deck.push(Card::Joker);
+    deck.push(Card::Joker);
     let mut hand = Vec::with_capacity(n);
     for _ in 0..n {
         let i = (rng.next() % deck.len() as u64) as usize;
@@ -82,10 +85,17 @@ fn main() {
         let mut chosen = 0u32;
         for _ in 0..SAMPLES {
             let dealt = random_hand(&mut rng, n);
+            // 盤面にジョーカーが残るため、evaluate_board の解決後盤面で
+            // 継続判定する(fantasyland_stay は未解決ジョーカーを評価できない)
+            let stays = |board: &Board| -> bool {
+                let eval =
+                    evaluate_board(board, &[], &normal.royalty, &normal.fantasyland).unwrap();
+                fantasyland_stay(&eval.resolved, &normal.fantasyland).unwrap()
+            };
             let (p, _) = choose_fantasyland(&dealt, &stay_seeker, 1).unwrap();
-            let can_stay = fantasyland_stay(&board_of(&p), &normal.fantasyland).unwrap();
+            let can_stay = stays(&board_of(&p));
             let (p, _) = choose_fantasyland(&dealt, &normal, 1).unwrap();
-            let does_stay = fantasyland_stay(&board_of(&p), &normal.fantasyland).unwrap();
+            let does_stay = stays(&board_of(&p));
             achievable += u32::from(can_stay);
             chosen += u32::from(does_stay);
         }

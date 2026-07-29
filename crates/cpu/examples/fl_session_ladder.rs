@@ -1,9 +1,12 @@
 //! FL 込みのセッション自己対戦で strength の単調性と計算時間を検証する。
 //! FL 突入・継続をハンドを跨いで引き継ぐ(実戦と同じ構造)。
+//! デッキはジョーカー 2 枚入り(チャイポ標準)。ジョーカーが盤面に残る
+//! ため、採点・FL 判定は evaluate_board の解決後盤面に対して行う。
 //! `cargo run --release -p ofc-engine-cpu --example fl_session_ladder`
 
 use std::time::Instant;
 
+use ofc_engine::evaluate::evaluate_board;
 use ofc_engine::fantasyland::{FantasylandRules, fantasyland_entry, fantasyland_stay};
 use ofc_engine::game::{GameState, Street};
 use ofc_engine::royalty::RoyaltyTable;
@@ -11,10 +14,12 @@ use ofc_engine::scoring::{ScoringRules, score_pair};
 use ofc_engine_cpu::{CpuConfig, choose_fantasyland, choose_move_seeded};
 
 const STRENGTHS: [f64; 5] = [0.0, 0.25, 0.5, 0.75, 1.0];
-const SESSIONS_PER_PAIR: u64 = 40;
+const SESSIONS_PER_PAIR: u64 = 200;
 const HANDS_PER_SESSION: u64 = 20;
 /// FL 継続時の配布枚数(標準では 14 枚固定が主流)。
 const FL_STAY_CARDS: u8 = 14;
+/// デッキのジョーカー枚数(チャイポ標準は 2)。
+const JOKERS: u8 = 2;
 
 fn main() {
     let royalty = RoyaltyTable::standard_american();
@@ -42,9 +47,9 @@ fn main() {
                 for hand in 0..HANDS_PER_SESSION {
                     let seed = ((i * 5 + j) as u64) * 1_000_000 + session * 1_000 + hand;
                     let mut state = if fl_next.iter().any(|&f| f > 0) {
-                        GameState::new_with_fantasyland(2, 0, seed, &fl_next).unwrap()
+                        GameState::new_with_fantasyland(2, JOKERS, seed, &fl_next).unwrap()
                     } else {
-                        GameState::new(2, 0, seed).unwrap()
+                        GameState::new(2, JOKERS, seed).unwrap()
                     };
                     let mut move_seed = seed.wrapping_mul(131);
                     while state.street() != Street::Finished {
@@ -80,15 +85,23 @@ fn main() {
                         move_seed = move_seed.wrapping_add(1);
                     }
 
+                    // ジョーカーが残る盤面は解決後の盤面で採点・FL 判定する
+                    let resolved: Vec<_> = (0..2)
+                        .map(|p| {
+                            evaluate_board(state.board(p), &[], &royalty, &fl_rules)
+                                .unwrap()
+                                .resolved
+                        })
+                        .collect();
                     let (p0, _) =
-                        score_pair(state.board(0), state.board(1), &royalty, &scoring).unwrap();
+                        score_pair(&resolved[0], &resolved[1], &royalty, &scoring).unwrap();
                     totals[i] += i64::from(p0);
                     totals[j] -= i64::from(p0);
                     matrix[i][j] += i64::from(p0);
 
                     // 次ハンドの FL 状態(突入 / 継続)を決める
                     for (player, strength_idx) in [(0usize, i), (1usize, j)] {
-                        let board = state.board(player);
+                        let board = &resolved[player];
                         fl_next[player] = if fl_next[player] > 0 {
                             if fantasyland_stay(board, &fl_rules).unwrap_or(false) {
                                 fl_stays[strength_idx] += 1;
