@@ -26,12 +26,14 @@ pub struct CpuConfig {
     pub fantasyland: FantasylandRules,
     /// 上段のペア形成(FL 突入)を優先するか。
     pub fl_aware: bool,
-    /// FL 突入の差分価値 φ̂(配布枚数 14/15/16/17 の順、ロイヤリティ点単位)。
-    /// 既定値は本 crate のセッション自己対戦で実測した連鎖価値
-    /// (examples/fl_phi_measure.rs、継続=枚数維持ルール・平場基準補正済み)。
-    /// AA は平均連鎖 2.4 ハンドで QQ の約 2.4 倍の価値。
-    /// 17 枚はサンプル希少のため外挿の概算値。
-    pub fl_entry_values: [f64; 4],
+    /// FL 突入の差分価値 φ̂ のグリッド(strength 0.0..=1.0 を 0.1 刻みの
+    /// 11 点 × 配布枚数 14/15/16/17 の 4 値、ロイヤリティ点単位)。
+    /// φ̂ は「その強さの自分がその後 FL をどうプレイするか」に依存するため
+    /// strength 別に持ち、実際の値は strength の位置で線形補間して使う。
+    /// 既定値は examples/fl_phi_measure.rs の自己対戦実測
+    /// (継続=枚数維持ルール・平場基準補正済み)。17 枚はサンプル希少のため
+    /// 概算の外挿値。
+    pub fl_phi_table: [[f64; 4]; 11],
 
     /// 強さ(0.0..=1.0)。各手番で貪欲方策を選ぶ確率(ε 混合)。
     /// 0.0 = 常にランダム合法手、1.0 = 常に貪欲手。範囲外は丸める。
@@ -41,9 +43,14 @@ pub struct CpuConfig {
 }
 
 impl CpuConfig {
-    /// 配布枚数(14..=17)に対応する φ。
+    /// 配布枚数(14..=17)に対応する φ。strength のグリッド区間で線形補間する。
     pub fn fl_value_for_cards(&self, cards: u8) -> f64 {
-        self.fl_entry_values[(cards.clamp(14, 17) - 14) as usize]
+        let level = (cards.clamp(14, 17) - 14) as usize;
+        let s = self.strength.clamp(0.0, 1.0) * 10.0;
+        let lower = (s.floor() as usize).min(10);
+        let upper = (lower + 1).min(10);
+        let frac = s - lower as f64;
+        self.fl_phi_table[lower][level] * (1.0 - frac) + self.fl_phi_table[upper][level] * frac
     }
 
     pub fn standard() -> Self {
@@ -51,7 +58,24 @@ impl CpuConfig {
             royalty: RoyaltyTable::standard_american(),
             fantasyland: FantasylandRules::standard_progressive(),
             fl_aware: true,
-            fl_entry_values: [29.2, 45.7, 70.8, 100.0],
+            // examples/fl_phi_measure.rs の実測(4,000 セッション/点)。
+            // 17 枚列はサンプル希少のため「AA(16 枚)以上」を下限に平滑化。
+            // s=0.9→1.0 で跳ねるのは、帯選択の「最適よりわずかに下」の配置が
+            // 継続条件(不連続)を落としやすく、弱いプレイでは FL を換金し
+            // きれないため(strength 別に φ を持つ理由そのもの)。
+            fl_phi_table: [
+                [13.2, 16.7, 16.1, 22.0],
+                [13.2, 15.8, 20.4, 20.4],
+                [14.8, 17.6, 20.2, 20.2],
+                [15.6, 17.9, 22.2, 22.7],
+                [15.8, 18.0, 19.5, 32.4],
+                [16.0, 19.9, 21.6, 38.2],
+                [17.6, 19.3, 20.9, 20.9],
+                [16.8, 19.9, 22.9, 31.3],
+                [18.8, 20.9, 22.4, 23.1],
+                [18.0, 21.2, 23.2, 33.2],
+                [30.4, 43.4, 73.4, 73.4],
+            ],
             strength: 1.0,
         }
     }

@@ -73,7 +73,7 @@ fn main() {
     const SAMPLES: usize = 2000;
     let normal = CpuConfig::standard();
     let mut stay_seeker = CpuConfig::standard();
-    stay_seeker.fl_entry_values = [100_000.0; 4]; // 継続可能なら必ず継続を選ぶ
+    stay_seeker.fl_phi_table = [[100_000.0; 4]; 11]; // 継続可能なら必ず継続を選ぶ
 
     println!(
         "{:>4} {:>14} {:>16} {:>14}",
