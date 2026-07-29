@@ -155,3 +155,41 @@ fn 三人対戦は全ペアの合計になる() {
     let (bc, _) = score_pair(&boards[1], &boards[2], &royalty, &scoring).unwrap();
     assert_eq!(totals, vec![ab + ac, -ab + bc, -ac - bc]);
 }
+
+#[test]
+fn ジョーカー入りの盤面も自動解決して採点できる() {
+    let (royalty, scoring) = rules();
+    // Xj は QQ / ストレート完成などに最適解決されてから採点される
+    let with_joker = board(
+        ["Qs", "Xj", "3d"],
+        ["8c", "8d", "8h", "Kc", "2s"],
+        ["Ah", "Kh", "Qd", "Jh", "Th"],
+    );
+    let (a, b) = score_pair(&with_joker, &weak_board(), &royalty, &scoring).unwrap();
+    // 解決後: top QQ(7) + middle trips(2) + bottom straight(2) = 11 + 全行勝ち 6
+    assert_eq!((a, b), (17, -17));
+
+    // score_matchup も同様に動く
+    let totals =
+        ofc_engine::scoring::score_matchup(&[with_joker, weak_board()], &royalty, &scoring)
+            .unwrap();
+    assert_eq!(totals, vec![17, -17]);
+}
+
+#[test]
+fn ジョーカーの解決は自盤面とだけ整合すればよい() {
+    // 両者の Joker が同じカードに解決されても採点できる(チャイポの
+    // ルール: 代入の辻褄は自分の盤面内でのみ要求される)
+    let (royalty, scoring) = rules();
+    let a = board(
+        ["Qs", "Xj", "3d"],
+        ["8c", "8d", "8h", "Kc", "2s"],
+        ["Ah", "Kh", "Qd", "Jh", "Th"],
+    );
+    let b = board(
+        ["Qh", "Xj", "3s"],
+        ["9c", "9d", "9h", "Kd", "2h"],
+        ["Ad", "Ks", "Qc", "Jd", "Td"],
+    );
+    assert!(score_pair(&a, &b, &royalty, &scoring).is_ok());
+}

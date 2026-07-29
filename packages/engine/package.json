@@ -1,6 +1,6 @@
 {
   "name": "ofc-engine",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "OFC ポーカーのコアロジックエンジン(Rust/wasm)の薄い TS クライアント",
   "type": "module",
   "license": "MIT",

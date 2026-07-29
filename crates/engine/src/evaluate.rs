@@ -47,9 +47,20 @@ pub fn evaluate_board(
         return Err(EvaluateError::IncompleteBoard);
     }
 
+    let best_board = resolve_jokers(board, used, royalty)?;
+    evaluation_of(&best_board, royalty, fl)
+}
+
+/// 盤面の Joker を最適解決した盤面を返す(Joker がなければそのまま複製)。
+/// 採点(scoring)など、評価以外の経路からも共用する。
+pub(crate) fn resolve_jokers(
+    board: &Board,
+    used: &[Card],
+    royalty: &RoyaltyTable,
+) -> Result<Board, EvaluateError> {
     let joker_slots = joker_positions(board);
-    let best_board = match joker_slots.as_slice() {
-        [] => board.clone(),
+    match joker_slots.as_slice() {
+        [] => Ok(board.clone()),
         slots => {
             let board_cards: Vec<Card> = board
                 .top()
@@ -59,11 +70,9 @@ pub fn evaluate_board(
                 .copied()
                 .collect();
             let candidates = available_cards(&board_cards, used);
-            resolve_best(board, slots, &candidates, royalty)?
+            resolve_best(board, slots, &candidates, royalty)
         }
-    };
-
-    evaluation_of(&best_board, royalty, fl)
+    }
 }
 
 /// (行番号 0=top/1=middle/2=bottom, 行内位置) で Joker の場所を列挙する。

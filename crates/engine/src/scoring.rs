@@ -47,6 +47,25 @@ struct BoardScore {
 
 impl BoardScore {
     fn new(board: &Board, table: &RoyaltyTable) -> Result<Self, FoulCheckError> {
+        // Joker 入り盤面は最適解決(ファウル回避 > ロイヤリティ > 行の強さ)
+        // してから採点する。解決の辻褄は自盤面内のみで要求される(チャイポの
+        // ルール解釈。相手盤面のカードと重複する解決も有効)。
+        let resolved;
+        let board = if board
+            .top()
+            .iter()
+            .chain(board.middle())
+            .chain(board.bottom())
+            .any(|c| matches!(c, crate::Card::Joker))
+        {
+            resolved = crate::evaluate::resolve_jokers(board, &[], table).map_err(|e| match e {
+                crate::evaluate::EvaluateError::IncompleteBoard => FoulCheckError::IncompleteBoard,
+                crate::evaluate::EvaluateError::Eval(e) => FoulCheckError::Eval(e),
+            })?;
+            &resolved
+        } else {
+            board
+        };
         let rows = evaluate_rows(board)?;
         let foul = is_foul(&rows);
         let royalty = if foul { 0 } else { rows_royalty(&rows, table) };
