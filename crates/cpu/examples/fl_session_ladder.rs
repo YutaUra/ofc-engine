@@ -22,15 +22,16 @@ fn main() {
     let fl_rules = FantasylandRules::standard_progressive();
 
     let mut totals = [0i64; STRENGTHS.len()];
-    let mut fl_entries = [0u64; STRENGTHS.len()];
+    // 突入種別: [QQ(14), KK(15), AA(16), trips(17)] + 継続
+    let mut fl_entries = [[0u64; 4]; STRENGTHS.len()];
+    let mut fl_stays = [0u64; STRENGTHS.len()];
+    let mut matrix = [[0i64; STRENGTHS.len()]; STRENGTHS.len()];
     let mut normal_moves = (0u64, 0u128, 0u128); // (count, total_ns, max_ns)
     let mut fl_moves = (0u64, 0u128, 0u128);
 
     for (i, &si) in STRENGTHS.iter().enumerate() {
         for (j, &sj) in STRENGTHS.iter().enumerate() {
-            if i == j {
-                continue;
-            }
+            // 同一 strength 同士(i == j)も対戦させる(期待値 ~0 の検算を兼ねる)
             let mut cfg_i = CpuConfig::standard();
             cfg_i.strength = si;
             let mut cfg_j = CpuConfig::standard();
@@ -83,12 +84,14 @@ fn main() {
                         score_pair(state.board(0), state.board(1), &royalty, &scoring).unwrap();
                     totals[i] += i64::from(p0);
                     totals[j] -= i64::from(p0);
+                    matrix[i][j] += i64::from(p0);
 
                     // 次ハンドの FL 状態(突入 / 継続)を決める
                     for (player, strength_idx) in [(0usize, i), (1usize, j)] {
                         let board = state.board(player);
                         fl_next[player] = if fl_next[player] > 0 {
                             if fantasyland_stay(board, &fl_rules).unwrap_or(false) {
+                                fl_stays[strength_idx] += 1;
                                 FL_STAY_CARDS
                             } else {
                                 0
@@ -97,8 +100,8 @@ fn main() {
                             let cards = fantasyland_entry(board, &fl_rules)
                                 .unwrap_or(None)
                                 .unwrap_or(0);
-                            if cards > 0 {
-                                fl_entries[strength_idx] += 1;
+                            if (14..=17).contains(&cards) {
+                                fl_entries[strength_idx][(cards - 14) as usize] += 1;
                             }
                             cards
                         };
@@ -108,15 +111,49 @@ fn main() {
         }
     }
 
-    let games = (STRENGTHS.len() - 1) as i64 * 2 * (SESSIONS_PER_PAIR * HANDS_PER_SESSION) as i64;
+    let hands_per_pair = (SESSIONS_PER_PAIR * HANDS_PER_SESSION) as f64;
+    // 各 strength は全列 + 全行(対角は両側)に登場する
+    let games = (STRENGTHS.len() * 2) as f64 * hands_per_pair;
     println!("== FL 込みセッションの強さ別総合得点(単調増加が期待値) ==");
     for (i, s) in STRENGTHS.iter().enumerate() {
         println!(
-            "strength {s:>4}: total {:>7}  (avg {:+.3}/hand, FL突入 {:>4} 回)",
+            "strength {s:>4}: total {:>7}  (avg {:+.3}/hand)",
             totals[i],
-            totals[i] as f64 / games as f64,
-            fl_entries[i]
+            totals[i] as f64 / games
         );
+    }
+
+    println!("\n== FL 突入・継続の回数(種別ごと) ==");
+    println!(
+        "{:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8}",
+        "strength", "QQ(14)", "KK(15)", "AA(16)", "3枚(17)", "突入計", "継続"
+    );
+    for (i, s) in STRENGTHS.iter().enumerate() {
+        let total: u64 = fl_entries[i].iter().sum();
+        println!(
+            "{:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8}",
+            s,
+            fl_entries[i][0],
+            fl_entries[i][1],
+            fl_entries[i][2],
+            fl_entries[i][3],
+            total,
+            fl_stays[i]
+        );
+    }
+
+    println!("\n== ヘッズアップ利得マトリクス(行プレイヤーの平均得点/hand) ==");
+    print!("{:>8}", "");
+    for s in STRENGTHS {
+        print!("{s:>8}");
+    }
+    println!();
+    for (i, s) in STRENGTHS.iter().enumerate() {
+        print!("{s:>8}");
+        for row in matrix[i].iter() {
+            print!("{:>8.3}", *row as f64 / hands_per_pair);
+        }
+        println!();
     }
 
     println!("\n== 計算時間 ==");
