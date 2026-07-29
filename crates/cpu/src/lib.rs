@@ -454,11 +454,16 @@ pub fn fantasyland_value(board: &Board, config: &CpuConfig) -> f64 {
 
 /// FL の一括配置を選ぶ(13 枚配置 + 残り捨て)。
 ///
-/// strength 1.0 は最適盤面(bottom 候補のビーム探索。14 枚では全列挙との
-/// 一致をテストで保証)。strength s < 1.0 では、最適値 best に対して
-/// [1/3 + 2/3·s, 2/3 + 1/3·s] × best の帯からターゲット値を seed で引き、
-/// それに最も近い非ファウル候補を選ぶ(s=0 で「最適の 1/3〜2/3 の出来」、
-/// s が上がるほど帯が最適へ狭まる)。どの強さでもファウル盤面は選ばない。
+/// strength 1.0 は分枝限定法による厳密な最適盤面。下段候補をロイヤリティ
+/// 降順に試し、「下段の役を固定すると中段は同カテゴリ以下・上段はさらに
+/// 残りカードで実際に作れるペア/トリップスまで、と上限が確定する」ことを
+/// 使って、既知の最良値を超えられない枝を丸ごと刈る(14 枚では独立実装の
+/// 全列挙と一致することをテストで保証)。
+///
+/// strength s < 1.0 では、最適値 best に対して [1/3 + 2/3·s, 2/3 + 1/3·s]
+/// × best の帯からターゲット値を seed で引き、ランダム候補サンプルの中から
+/// 最も近い非ファウル盤面を選ぶ(s=0 で「最適の 1/3〜2/3 の出来」)。
+/// どの強さでもファウル盤面は選ばない。
 pub fn choose_fantasyland(
     dealt: &[Card],
     config: &CpuConfig,
@@ -467,63 +472,22 @@ pub fn choose_fantasyland(
     if !(13..=17).contains(&dealt.len()) {
         return None;
     }
-    let n = dealt.len();
 
-    // 5 枚組み合わせ(bottom/middle 共用)と 3 枚組み合わせの評価を
-    // ビットマスク付きで前計算する
-    let five: Vec<(u32, HandRank)> = combo_masks(n, 5)
-        .into_iter()
-        .map(|mask| (mask, eval_subset(dealt, mask, RowArity::Five)))
-        .collect();
-
-    // bottom 候補は役の強さ順のビーム。強い bottom ほど middle の実行可能
-    // 空間(m ≤ b)が広く、最適解が上位に入る(14 枚の全列挙一致テストで検証)
-    let mut bottoms: Vec<&(u32, HandRank)> = five.iter().collect();
-    bottoms.sort_unstable_by(|a, b| b.1.cmp(&a.1));
-    bottoms.truncate(FL_BOTTOM_BEAM);
-
-    let stay_top = config.fantasyland.stays_on_top_trips();
-    let stay_bottom = config.fantasyland.stays_on_bottom_quads_or_better();
-    let value_of = |b: &HandRank, m: &HandRank, t: &HandRank| -> f64 {
-        let royalty = royalty_points(Row::Bottom, b, &config.royalty)
-            + royalty_points(Row::Middle, m, &config.royalty)
-            + royalty_points(Row::Top, t, &config.royalty);
-        let stay = (stay_top && t.category == Category::Trips)
-            || (stay_bottom && b.category >= Category::Quads);
-        f64::from(royalty) + if stay { config.fl_stay_value } else { 0.0 }
-    };
-
-    // フェーズ 1: 最適値を求める。フェーズ 2: 帯ターゲットに最も近い候補を
-    // 選ぶ(候補全体を保持するとメモリが跳ねるため 2 回列挙する)
-    let mut best_value = f64::NEG_INFINITY;
-    enumerate_fl(dealt, &five, &bottoms, |b, m, t, _masks| {
-        best_value = best_value.max(value_of(b, m, t));
-    });
-    if best_value == f64::NEG_INFINITY {
-        return None;
-    }
+    let (best_value, best_masks) = fl_search_best(dealt, config)?;
 
     let strength = config.strength.clamp(0.0, 1.0);
-    let target = if strength >= 1.0 {
-        best_value
+    let masks = if strength >= 1.0 {
+        best_masks
     } else {
         let lo = 1.0 / 3.0 + (2.0 / 3.0) * strength;
         let hi = 2.0 / 3.0 + (1.0 / 3.0) * strength;
         let mut rng = Xorshift::new(seed);
         let u = (rng.next() % 10_000) as f64 / 10_000.0;
-        best_value * (lo + u * (hi - lo))
+        let target = best_value * (lo + u * (hi - lo));
+        fl_sample_near(dealt, config, target, &mut rng).unwrap_or(best_masks)
     };
 
-    let mut chosen: Option<(f64, [u32; 3])> = None;
-    enumerate_fl(dealt, &five, &bottoms, |b, m, t, masks| {
-        let v = value_of(b, m, t);
-        let dist = (v - target).abs();
-        if chosen.is_none_or(|(cd, _)| dist < cd) {
-            chosen = Some((dist, masks));
-        }
-    });
-
-    let (_, [b_mask, m_mask, t_mask]) = chosen?;
+    let [b_mask, m_mask, t_mask] = masks;
     let mut placements = Vec::with_capacity(13);
     let mut discards = Vec::new();
     for (i, &card) in dealt.iter().enumerate() {
@@ -545,20 +509,68 @@ pub fn choose_fantasyland(
     Some((placements, discards))
 }
 
-/// bottom ビーム × middle × top の非ファウル分割を列挙してコールバックする。
-fn enumerate_fl(
-    dealt: &[Card],
-    five: &[(u32, HandRank)],
-    bottoms: &[&(u32, HandRank)],
-    mut visit: impl FnMut(&HandRank, &HandRank, &HandRank, [u32; 3]),
-) {
+/// 分枝限定法で FL の厳密最適(価値, [bottom, middle, top] マスク)を求める。
+fn fl_search_best(dealt: &[Card], config: &CpuConfig) -> Option<(f64, [u32; 3])> {
     let n = dealt.len();
-    for entry in bottoms {
-        let (b_mask, b_hand) = (entry.0, &entry.1);
-        for (m_mask, m_hand) in five {
+    let stay_top = config.fantasyland.stays_on_top_trips();
+    let stay_bottom = config.fantasyland.stays_on_bottom_quads_or_better();
+
+    // 5 枚部分集合の役を前計算し、下段候補としてロイヤリティ→役の強さ順に並べる
+    let five: Vec<(u32, HandRank, u32)> = combo_masks(n, 5)
+        .into_iter()
+        .map(|mask| {
+            let hand = eval_subset(dealt, mask, RowArity::Five);
+            let roy = royalty_points(Row::Bottom, &hand, &config.royalty);
+            (mask, hand, roy)
+        })
+        .collect();
+    let mut bottoms: Vec<&(u32, HandRank, u32)> = five.iter().collect();
+    bottoms.sort_unstable_by(|a, b| (b.2, &b.1).cmp(&(a.2, &a.1)));
+
+    // 中段ロイヤリティの「カテゴリ以下での最大値」前計算(下段カテゴリで引く)
+    let mut mid_prefix_max = [0u32; 10];
+    for cat in 0..10usize {
+        let hand = HandRank {
+            category: CATEGORY_ORDER[cat],
+            tiebreak: vec![],
+        };
+        let roy = royalty_points(Row::Middle, &hand, &config.royalty);
+        mid_prefix_max[cat] = roy.max(if cat > 0 { mid_prefix_max[cat - 1] } else { 0 });
+    }
+
+    let mut best: Option<(f64, [u32; 3])> = None;
+    for entry in &bottoms {
+        let (b_mask, b_hand, b_roy) = (entry.0, &entry.1, entry.2);
+        let b_cat = b_hand.category as usize;
+
+        // 下段確定分の継続価値と、残りカードから作れる上段の上限
+        let stay_b = stay_bottom && b_hand.category >= Category::Quads;
+        let remaining = rank_pool(dealt, b_mask);
+        let top_ub = top_upper_bound(&remaining, b_cat, config);
+        let stay_ub = stay_b
+            || (stay_top && b_cat >= Category::Trips as usize && trips_achievable(&remaining));
+        let bound = f64::from(b_roy + mid_prefix_max[b_cat] + top_ub)
+            + if stay_ub { config.fl_stay_value } else { 0.0 };
+        if best.as_ref().is_some_and(|(bv, _)| bound <= *bv) {
+            continue; // この下段では既知の最良を超えられない
+        }
+
+        for (m_mask, m_hand, _) in &five {
             if m_mask & b_mask != 0 || m_hand > b_hand {
                 continue;
             }
+            let m_roy = royalty_points(Row::Middle, m_hand, &config.royalty);
+            let after_mid = rank_pool_minus(&remaining, dealt, *m_mask);
+            let m_cat = m_hand.category as usize;
+            let top_ub2 = top_upper_bound(&after_mid, m_cat, config);
+            let stay_ub2 = stay_b
+                || (stay_top && m_cat >= Category::Trips as usize && trips_achievable(&after_mid));
+            let bound2 = f64::from(b_roy + m_roy + top_ub2)
+                + if stay_ub2 { config.fl_stay_value } else { 0.0 };
+            if best.as_ref().is_some_and(|(bv, _)| bound2 <= *bv) {
+                continue;
+            }
+
             let rest: Vec<usize> = (0..n)
                 .filter(|i| (b_mask | m_mask) & (1 << i) == 0)
                 .collect();
@@ -570,18 +582,152 @@ fn enumerate_fl(
                     .map(|(_, i)| 1u32 << i)
                     .sum();
                 let t_hand = eval_subset(dealt, t_mask, RowArity::Three);
-                if t_hand > *m_hand {
+                if &t_hand > m_hand {
                     continue;
                 }
-                visit(b_hand, m_hand, &t_hand, [b_mask, *m_mask, t_mask]);
+                let t_roy = royalty_points(Row::Top, &t_hand, &config.royalty);
+                let stay = stay_b || (stay_top && t_hand.category == Category::Trips);
+                let value = f64::from(b_roy + m_roy + t_roy)
+                    + if stay { config.fl_stay_value } else { 0.0 };
+                if best.as_ref().is_none_or(|(bv, _)| value > *bv) {
+                    best = Some((value, [b_mask, *m_mask, t_mask]));
+                }
             }
         }
     }
+    best
 }
 
-/// ビーム幅。14 枚の全列挙一致テストが通る値を選んでいる(狭めるときは
-/// テストで再確認すること)。
-const FL_BOTTOM_BEAM: usize = 80;
+/// 判別値順のカテゴリ一覧(mid_prefix_max の添字用)。
+const CATEGORY_ORDER: [Category; 10] = [
+    Category::HighCard,
+    Category::Pair,
+    Category::TwoPair,
+    Category::Trips,
+    Category::Straight,
+    Category::Flush,
+    Category::FullHouse,
+    Category::Quads,
+    Category::StraightFlush,
+    Category::RoyalFlush,
+];
+
+/// (ランク別枚数, ジョーカー枚数)。上段の到達可能ロイヤリティ上限の計算用。
+type RankPool = ([u8; 13], u8);
+
+fn rank_pool(dealt: &[Card], used_mask: u32) -> RankPool {
+    let mut counts = [0u8; 13];
+    let mut jokers = 0u8;
+    for (i, card) in dealt.iter().enumerate() {
+        if used_mask & (1 << i) != 0 {
+            continue;
+        }
+        match card {
+            Card::Standard { rank, .. } => counts[*rank as usize] += 1,
+            Card::Joker => jokers += 1,
+        }
+    }
+    (counts, jokers)
+}
+
+fn rank_pool_minus(pool: &RankPool, dealt: &[Card], remove_mask: u32) -> RankPool {
+    let (mut counts, mut jokers) = *pool;
+    for (i, card) in dealt.iter().enumerate() {
+        if remove_mask & (1 << i) == 0 {
+            continue;
+        }
+        match card {
+            Card::Standard { rank, .. } => counts[*rank as usize] -= 1,
+            Card::Joker => jokers -= 1,
+        }
+    }
+    (counts, jokers)
+}
+
+/// 残りカードから実際に作れる上段役(カテゴリ ≤ cap_cat)のロイヤリティ上限。
+/// 「AA が残っていなければ TT が上限」のように、表ではなく在庫で絞る。
+fn top_upper_bound(pool: &RankPool, cap_cat: usize, config: &CpuConfig) -> u32 {
+    let (counts, jokers) = pool;
+    let mut ub = 0u32;
+    if cap_cat >= Category::Trips as usize {
+        for (r, &count) in counts.iter().enumerate() {
+            if count >= 1 && count + jokers >= 3 {
+                let hand = HandRank {
+                    category: Category::Trips,
+                    tiebreak: vec![Rank::ALL_CPU[r]],
+                };
+                ub = ub.max(royalty_points(Row::Top, &hand, &config.royalty));
+            }
+        }
+    }
+    if cap_cat >= Category::Pair as usize {
+        for (r, &count) in counts.iter().enumerate() {
+            if count >= 2 || (count >= 1 && *jokers >= 1) {
+                let hand = HandRank {
+                    category: Category::Pair,
+                    tiebreak: vec![Rank::ALL_CPU[r]],
+                };
+                ub = ub.max(royalty_points(Row::Top, &hand, &config.royalty));
+            }
+        }
+    }
+    ub
+}
+
+fn trips_achievable(pool: &RankPool) -> bool {
+    let (counts, jokers) = pool;
+    counts.iter().any(|&c| c >= 1 && c + jokers >= 3)
+}
+
+/// 帯選択用: ランダムな非ファウル分割をサンプリングし、価値が target に
+/// 最も近いものを返す(弱い強さの精度は重要でないため厳密性は要らない)。
+fn fl_sample_near(
+    dealt: &[Card],
+    config: &CpuConfig,
+    target: f64,
+    rng: &mut Xorshift,
+) -> Option<[u32; 3]> {
+    const SAMPLES: usize = 2000;
+    let n = dealt.len();
+    let mut best: Option<(f64, [u32; 3])> = None;
+    for _ in 0..SAMPLES {
+        // 13 枚をランダムに選び 5/5/3 に割る。2 つの 5 枚組は強い方を bottom に
+        let mut indices: Vec<usize> = (0..n).collect();
+        for i in (1..n).rev() {
+            let j = (rng.next() % (i as u64 + 1)) as usize;
+            indices.swap(i, j);
+        }
+        let mask_of = |slice: &[usize]| -> u32 { slice.iter().map(|i| 1u32 << i).sum() };
+        let (five_a, five_b, three) = (
+            mask_of(&indices[0..5]),
+            mask_of(&indices[5..10]),
+            mask_of(&indices[10..13]),
+        );
+        let hand_a = eval_subset(dealt, five_a, RowArity::Five);
+        let hand_b = eval_subset(dealt, five_b, RowArity::Five);
+        let (b_mask, b_hand, m_mask, m_hand) = if hand_a >= hand_b {
+            (five_a, hand_a, five_b, hand_b)
+        } else {
+            (five_b, hand_b, five_a, hand_a)
+        };
+        let t_hand = eval_subset(dealt, three, RowArity::Three);
+        if t_hand > m_hand {
+            continue; // ファウル形はサンプルし直す
+        }
+        let roy = royalty_points(Row::Bottom, &b_hand, &config.royalty)
+            + royalty_points(Row::Middle, &m_hand, &config.royalty)
+            + royalty_points(Row::Top, &t_hand, &config.royalty);
+        let stay = (config.fantasyland.stays_on_top_trips() && t_hand.category == Category::Trips)
+            || (config.fantasyland.stays_on_bottom_quads_or_better()
+                && b_hand.category >= Category::Quads);
+        let value = f64::from(roy) + if stay { config.fl_stay_value } else { 0.0 };
+        let dist = (value - target).abs();
+        if best.is_none_or(|(bd, _)| dist < bd) {
+            best = Some((dist, [b_mask, m_mask, three]));
+        }
+    }
+    best.map(|(_, masks)| masks)
+}
 
 /// n 要素から k 個選ぶ全組み合わせをビットマスクで返す。
 fn combo_masks(n: usize, k: usize) -> Vec<u32> {
@@ -605,4 +751,26 @@ fn eval_subset(dealt: &[Card], mask: u32, arity: RowArity) -> HandRank {
         .map(|i| dealt[i])
         .collect();
     evaluate_completed_row(if arity == RowArity::Three { 0 } else { 2 }, &cards, &[])
+}
+
+/// Rank の判別値順一覧(engine の Rank::ALL は crate 内部のため複製)。
+trait RankAllCpu {
+    const ALL_CPU: [Rank; 13];
+}
+impl RankAllCpu for Rank {
+    const ALL_CPU: [Rank; 13] = [
+        Rank::Two,
+        Rank::Three,
+        Rank::Four,
+        Rank::Five,
+        Rank::Six,
+        Rank::Seven,
+        Rank::Eight,
+        Rank::Nine,
+        Rank::Ten,
+        Rank::Jack,
+        Rank::Queen,
+        Rank::King,
+        Rank::Ace,
+    ];
 }
