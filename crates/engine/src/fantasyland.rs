@@ -32,6 +32,16 @@ impl FantasylandRules {
         }
     }
 
+    /// 継続条件: top トリップスで継続できるか。
+    pub fn stays_on_top_trips(&self) -> bool {
+        self.stay_top_trips
+    }
+
+    /// 継続条件: bottom クワッズ以上で継続できるか。
+    pub fn stays_on_bottom_quads_or_better(&self) -> bool {
+        self.stay_bottom_quads_or_better
+    }
+
     /// 全突入条件の配布枚数を一律にする(非 progressive のローカルルール)。
     pub fn set_uniform_cards(&mut self, cards: u8) {
         for value in self.pair_cards.values_mut() {

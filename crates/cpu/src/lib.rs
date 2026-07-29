@@ -15,7 +15,7 @@
 use ofc_engine::evaluate::evaluate_board;
 use ofc_engine::fantasyland::FantasylandRules;
 use ofc_engine::game::{Placement, RowKind, Street};
-use ofc_engine::hand::{HandRank, evaluate_five, evaluate_three};
+use ofc_engine::hand::{Category, HandRank, evaluate_five, evaluate_three};
 use ofc_engine::joker::{RowArity, resolve_row};
 use ofc_engine::royalty::{Row, RoyaltyTable, royalty_points};
 use ofc_engine::{Board, Card, Rank};
@@ -26,6 +26,9 @@ pub struct CpuConfig {
     pub fantasyland: FantasylandRules,
     /// 上段のペア形成(FL 突入)を優先するか。
     pub fl_aware: bool,
+    /// FL 継続の価値(点数換算)。FL 配置の価値 = 素点 + 継続ならこの値。
+    /// 既定 6.0 は「FL 1 回の平均的な得点優位」の保守的な見積もり。
+    pub fl_stay_value: f64,
     /// 強さ(0.0..=1.0)。各手番で貪欲方策を選ぶ確率(ε 混合)。
     /// 0.0 = 常にランダム合法手、1.0 = 常に貪欲手。範囲外は丸める。
     /// 1.0 未満で使うときは choose_move_seeded に手番ごとに異なる seed を
@@ -39,6 +42,7 @@ impl CpuConfig {
             royalty: RoyaltyTable::standard_american(),
             fantasyland: FantasylandRules::standard_progressive(),
             fl_aware: true,
+            fl_stay_value: 6.0,
             strength: 1.0,
         }
     }
@@ -430,4 +434,175 @@ fn fl_setup_bonus(top: &[Card]) -> i64 {
         bonus = bonus.max(8);
     }
     bonus
+}
+
+// ---- Fantasyland 配置方策 ----
+
+/// FL 盤面の価値: ファウルなら大きな負値、そうでなければ
+/// 素点(ロイヤリティ合計)+ 継続できるなら fl_stay_value。
+/// Joker は evaluate_board が盤面全体で最適解決する。
+pub fn fantasyland_value(board: &Board, config: &CpuConfig) -> f64 {
+    let eval = evaluate_board(board, &[], &config.royalty, &config.fantasyland)
+        .expect("完成盤面の評価は失敗しない");
+    if eval.foul {
+        return -1000.0;
+    }
+    let stay = ofc_engine::fantasyland::fantasyland_stay(&eval.resolved, &config.fantasyland)
+        .unwrap_or(false);
+    f64::from(eval.royalty_total) + if stay { config.fl_stay_value } else { 0.0 }
+}
+
+/// FL の一括配置を選ぶ(13 枚配置 + 残り捨て)。
+///
+/// strength 1.0 は最適盤面(bottom 候補のビーム探索。14 枚では全列挙との
+/// 一致をテストで保証)。strength s < 1.0 では、最適値 best に対して
+/// [1/3 + 2/3·s, 2/3 + 1/3·s] × best の帯からターゲット値を seed で引き、
+/// それに最も近い非ファウル候補を選ぶ(s=0 で「最適の 1/3〜2/3 の出来」、
+/// s が上がるほど帯が最適へ狭まる)。どの強さでもファウル盤面は選ばない。
+pub fn choose_fantasyland(
+    dealt: &[Card],
+    config: &CpuConfig,
+    seed: u64,
+) -> Option<(Vec<Placement>, Vec<Card>)> {
+    if !(13..=17).contains(&dealt.len()) {
+        return None;
+    }
+    let n = dealt.len();
+
+    // 5 枚組み合わせ(bottom/middle 共用)と 3 枚組み合わせの評価を
+    // ビットマスク付きで前計算する
+    let five: Vec<(u32, HandRank)> = combo_masks(n, 5)
+        .into_iter()
+        .map(|mask| (mask, eval_subset(dealt, mask, RowArity::Five)))
+        .collect();
+
+    // bottom 候補は役の強さ順のビーム。強い bottom ほど middle の実行可能
+    // 空間(m ≤ b)が広く、最適解が上位に入る(14 枚の全列挙一致テストで検証)
+    let mut bottoms: Vec<&(u32, HandRank)> = five.iter().collect();
+    bottoms.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+    bottoms.truncate(FL_BOTTOM_BEAM);
+
+    let stay_top = config.fantasyland.stays_on_top_trips();
+    let stay_bottom = config.fantasyland.stays_on_bottom_quads_or_better();
+    let value_of = |b: &HandRank, m: &HandRank, t: &HandRank| -> f64 {
+        let royalty = royalty_points(Row::Bottom, b, &config.royalty)
+            + royalty_points(Row::Middle, m, &config.royalty)
+            + royalty_points(Row::Top, t, &config.royalty);
+        let stay = (stay_top && t.category == Category::Trips)
+            || (stay_bottom && b.category >= Category::Quads);
+        f64::from(royalty) + if stay { config.fl_stay_value } else { 0.0 }
+    };
+
+    // フェーズ 1: 最適値を求める。フェーズ 2: 帯ターゲットに最も近い候補を
+    // 選ぶ(候補全体を保持するとメモリが跳ねるため 2 回列挙する)
+    let mut best_value = f64::NEG_INFINITY;
+    enumerate_fl(dealt, &five, &bottoms, |b, m, t, _masks| {
+        best_value = best_value.max(value_of(b, m, t));
+    });
+    if best_value == f64::NEG_INFINITY {
+        return None;
+    }
+
+    let strength = config.strength.clamp(0.0, 1.0);
+    let target = if strength >= 1.0 {
+        best_value
+    } else {
+        let lo = 1.0 / 3.0 + (2.0 / 3.0) * strength;
+        let hi = 2.0 / 3.0 + (1.0 / 3.0) * strength;
+        let mut rng = Xorshift::new(seed);
+        let u = (rng.next() % 10_000) as f64 / 10_000.0;
+        best_value * (lo + u * (hi - lo))
+    };
+
+    let mut chosen: Option<(f64, [u32; 3])> = None;
+    enumerate_fl(dealt, &five, &bottoms, |b, m, t, masks| {
+        let v = value_of(b, m, t);
+        let dist = (v - target).abs();
+        if chosen.is_none_or(|(cd, _)| dist < cd) {
+            chosen = Some((dist, masks));
+        }
+    });
+
+    let (_, [b_mask, m_mask, t_mask]) = chosen?;
+    let mut placements = Vec::with_capacity(13);
+    let mut discards = Vec::new();
+    for (i, &card) in dealt.iter().enumerate() {
+        let bit = 1u32 << i;
+        let row = if b_mask & bit != 0 {
+            Some(RowKind::Bottom)
+        } else if m_mask & bit != 0 {
+            Some(RowKind::Middle)
+        } else if t_mask & bit != 0 {
+            Some(RowKind::Top)
+        } else {
+            None
+        };
+        match row {
+            Some(row) => placements.push(Placement { card, row }),
+            None => discards.push(card),
+        }
+    }
+    Some((placements, discards))
+}
+
+/// bottom ビーム × middle × top の非ファウル分割を列挙してコールバックする。
+fn enumerate_fl(
+    dealt: &[Card],
+    five: &[(u32, HandRank)],
+    bottoms: &[&(u32, HandRank)],
+    mut visit: impl FnMut(&HandRank, &HandRank, &HandRank, [u32; 3]),
+) {
+    let n = dealt.len();
+    for entry in bottoms {
+        let (b_mask, b_hand) = (entry.0, &entry.1);
+        for (m_mask, m_hand) in five {
+            if m_mask & b_mask != 0 || m_hand > b_hand {
+                continue;
+            }
+            let rest: Vec<usize> = (0..n)
+                .filter(|i| (b_mask | m_mask) & (1 << i) == 0)
+                .collect();
+            for t_indices in combo_masks(rest.len(), 3) {
+                let t_mask: u32 = rest
+                    .iter()
+                    .enumerate()
+                    .filter(|(j, _)| t_indices & (1 << j) != 0)
+                    .map(|(_, i)| 1u32 << i)
+                    .sum();
+                let t_hand = eval_subset(dealt, t_mask, RowArity::Three);
+                if t_hand > *m_hand {
+                    continue;
+                }
+                visit(b_hand, m_hand, &t_hand, [b_mask, *m_mask, t_mask]);
+            }
+        }
+    }
+}
+
+/// ビーム幅。14 枚の全列挙一致テストが通る値を選んでいる(狭めるときは
+/// テストで再確認すること)。
+const FL_BOTTOM_BEAM: usize = 80;
+
+/// n 要素から k 個選ぶ全組み合わせをビットマスクで返す。
+fn combo_masks(n: usize, k: usize) -> Vec<u32> {
+    let mut result = Vec::new();
+    let mut mask = (1u32 << k) - 1;
+    while mask < (1u32 << n) {
+        result.push(mask);
+        // Gosper's hack: 次に大きい同 popcount のビット列
+        let c = mask & mask.wrapping_neg();
+        let r = mask + c;
+        mask = (((r ^ mask) >> 2) / c) | r;
+    }
+    result
+}
+
+/// マスクで選んだカード部分集合の役。Joker 入りは行単独の最強解決で近似する
+/// (最終盤面の厳密解決は fantasyland_value / 採点側の evaluate_board が行う)。
+fn eval_subset(dealt: &[Card], mask: u32, arity: RowArity) -> HandRank {
+    let cards: Vec<Card> = (0..dealt.len())
+        .filter(|i| mask & (1 << i) != 0)
+        .map(|i| dealt[i])
+        .collect();
+    evaluate_completed_row(if arity == RowArity::Three { 0 } else { 2 }, &cards, &[])
 }
