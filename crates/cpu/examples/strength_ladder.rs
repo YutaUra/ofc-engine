@@ -75,11 +75,11 @@ fn main() {
     println!();
     for (i, s) in STRENGTHS.iter().enumerate() {
         print!("{s:>8}");
-        for j in 0..STRENGTHS.len() {
+        for (j, cell) in matrix[i].iter().enumerate() {
             if i == j {
                 print!("{:>8}", "-");
             } else {
-                print!("{:>8}", matrix[i][j]);
+                print!("{cell:>8}");
             }
         }
         println!();
