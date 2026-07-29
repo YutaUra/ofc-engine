@@ -51,7 +51,7 @@ fn 強さ1はファウルしない最適盤面を選ぶ() {
     let board = to_board(&placements);
     assert_eq!(ofc_engine::foul::check_foul(&board), Ok(false));
     // AAA(フルハウス素材)があるので素点 0 はありえない
-    assert!(fantasyland_value(&board, &config()) > 0.0);
+    assert!(fantasyland_value(&board, &config(), 14) > 0.0);
 }
 
 #[test]
@@ -71,7 +71,7 @@ fn 強さ1は14枚の全列挙と同じ価値になる() {
         }
 
         let (placements, _) = choose_fantasyland(&dealt, &config(), 1).unwrap();
-        let chosen = fantasyland_value(&to_board(&placements), &config());
+        let chosen = fantasyland_value(&to_board(&placements), &config(), 14);
         let best = exhaustive_best_value(&dealt);
         assert!(
             (chosen - best).abs() < 1e-9,
@@ -88,7 +88,7 @@ fn 強さ0は最適値のおよそ3分の1から3分の2の盤面を選ぶ() {
     let cfg = config();
     let best = {
         let (p, _) = choose_fantasyland(&dealt, &cfg, 1).unwrap();
-        fantasyland_value(&to_board(&p), &cfg)
+        fantasyland_value(&to_board(&p), &cfg, 14)
     };
     let mut weak = cfg.clone();
     weak.strength = 0.0;
@@ -97,7 +97,7 @@ fn 強さ0は最適値のおよそ3分の1から3分の2の盤面を選ぶ() {
         let board = to_board(&p);
         // 帯選択でもファウル盤面は選ばない
         assert_eq!(ofc_engine::foul::check_foul(&board), Ok(false));
-        let v = fantasyland_value(&board, &weak);
+        let v = fantasyland_value(&board, &weak, 14);
         // 候補の離散性があるため帯 [1/3, 2/3] ± 20% まで許容する
         assert!(
             v >= best * 0.15 && v <= best * 0.85,
@@ -202,7 +202,7 @@ fn exhaustive_best_value(dealt: &[Card]) -> f64 {
                 let top: Vec<Card> = top_idx.iter().map(|i| rest2[*i]).collect();
                 let board = Board::new(top.clone(), middle.clone(), bottom.clone()).unwrap();
                 if ofc_engine::foul::check_foul(&board) == Ok(false) {
-                    best = best.max(fantasyland_value(&board, &cfg));
+                    best = best.max(fantasyland_value(&board, &cfg, 14));
                 }
             }
         }

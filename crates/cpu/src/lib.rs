@@ -28,14 +28,11 @@ pub struct CpuConfig {
     pub fl_aware: bool,
     /// FL 突入の差分価値 φ̂(配布枚数 14/15/16/17 の順、ロイヤリティ点単位)。
     /// 既定値は本 crate のセッション自己対戦で実測した連鎖価値
-    /// (examples/fl_phi_measure.rs、平場基準補正済み)。solver の理論 φ
-    /// (QQ=7.9/KK=18.9/AA=39.3)より勾配が平坦なのは、継続ルールが
-    /// 「常に 14 枚」のため上位突入の優位が 1 ハンド目で薄まるから。
-    /// 17 枚はサンプル不足のため solver 値を暫定使用。
+    /// (examples/fl_phi_measure.rs、継続=枚数維持ルール・平場基準補正済み)。
+    /// AA は平均連鎖 2.4 ハンドで QQ の約 2.4 倍の価値。
+    /// 17 枚はサンプル希少のため外挿の概算値。
     pub fl_entry_values: [f64; 4],
-    /// FL 継続時の配布枚数(ローカルルール。既定 14)。
-    /// 継続の追加価値は「そのレベルの FL をもう一周」なので φ(この枚数)。
-    pub fl_stay_cards: u8,
+
     /// 強さ(0.0..=1.0)。各手番で貪欲方策を選ぶ確率(ε 混合)。
     /// 0.0 = 常にランダム合法手、1.0 = 常に貪欲手。範囲外は丸める。
     /// 1.0 未満で使うときは choose_move_seeded に手番ごとに異なる seed を
@@ -49,18 +46,12 @@ impl CpuConfig {
         self.fl_entry_values[(cards.clamp(14, 17) - 14) as usize]
     }
 
-    /// FL 継続の追加価値 = φ(継続時の配布枚数)。
-    pub fn fl_stay_value(&self) -> f64 {
-        self.fl_value_for_cards(self.fl_stay_cards)
-    }
-
     pub fn standard() -> Self {
         Self {
             royalty: RoyaltyTable::standard_american(),
             fantasyland: FantasylandRules::standard_progressive(),
             fl_aware: true,
-            fl_entry_values: [29.9, 36.9, 46.1, 84.1],
-            fl_stay_cards: 14,
+            fl_entry_values: [29.2, 45.7, 70.8, 100.0],
             strength: 1.0,
         }
     }
@@ -474,9 +465,9 @@ fn fl_setup_bonus(top: &[Card], config: &CpuConfig) -> f64 {
 // ---- Fantasyland 配置方策 ----
 
 /// FL 盤面の価値: ファウルなら大きな負値、そうでなければ
-/// 素点(ロイヤリティ合計)+ 継続できるなら fl_stay_value。
+/// 素点(ロイヤリティ合計)+ 継続できるなら φ(現在の配布枚数)。
 /// Joker は evaluate_board が盤面全体で最適解決する。
-pub fn fantasyland_value(board: &Board, config: &CpuConfig) -> f64 {
+pub fn fantasyland_value(board: &Board, config: &CpuConfig, fl_cards: u8) -> f64 {
     let eval = evaluate_board(board, &[], &config.royalty, &config.fantasyland)
         .expect("完成盤面の評価は失敗しない");
     if eval.foul {
@@ -484,7 +475,13 @@ pub fn fantasyland_value(board: &Board, config: &CpuConfig) -> f64 {
     }
     let stay = ofc_engine::fantasyland::fantasyland_stay(&eval.resolved, &config.fantasyland)
         .unwrap_or(false);
-    f64::from(eval.royalty_total) + if stay { config.fl_stay_value() } else { 0.0 }
+    // 継続は枚数維持ルール: 継続価値 = 現在の配布枚数の φ
+    f64::from(eval.royalty_total)
+        + if stay {
+            config.fl_value_for_cards(fl_cards)
+        } else {
+            0.0
+        }
 }
 
 /// FL の一括配置を選ぶ(13 枚配置 + 残り捨て)。
@@ -508,7 +505,8 @@ pub fn choose_fantasyland(
         return None;
     }
 
-    let (best_value, best_masks) = fl_search_best(dealt, config)?;
+    let stay_value = config.fl_value_for_cards(dealt.len() as u8);
+    let (best_value, best_masks) = fl_search_best(dealt, config, stay_value)?;
 
     let strength = config.strength.clamp(0.0, 1.0);
     let masks = if strength >= 1.0 {
@@ -519,7 +517,7 @@ pub fn choose_fantasyland(
         let mut rng = Xorshift::new(seed);
         let u = (rng.next() % 10_000) as f64 / 10_000.0;
         let target = best_value * (lo + u * (hi - lo));
-        fl_sample_near(dealt, config, target, &mut rng).unwrap_or(best_masks)
+        fl_sample_near(dealt, config, stay_value, target, &mut rng).unwrap_or(best_masks)
     };
 
     let [b_mask, m_mask, t_mask] = masks;
@@ -545,7 +543,7 @@ pub fn choose_fantasyland(
 }
 
 /// 分枝限定法で FL の厳密最適(価値, [bottom, middle, top] マスク)を求める。
-fn fl_search_best(dealt: &[Card], config: &CpuConfig) -> Option<(f64, [u32; 3])> {
+fn fl_search_best(dealt: &[Card], config: &CpuConfig, stay_value: f64) -> Option<(f64, [u32; 3])> {
     let n = dealt.len();
     let stay_top = config.fantasyland.stays_on_top_trips();
     let stay_bottom = config.fantasyland.stays_on_bottom_quads_or_better();
@@ -585,7 +583,7 @@ fn fl_search_best(dealt: &[Card], config: &CpuConfig) -> Option<(f64, [u32; 3])>
         let stay_ub = stay_b
             || (stay_top && b_cat >= Category::Trips as usize && trips_achievable(&remaining));
         let bound = f64::from(b_roy + mid_prefix_max[b_cat] + top_ub)
-            + if stay_ub { config.fl_stay_value() } else { 0.0 };
+            + if stay_ub { stay_value } else { 0.0 };
         if best.as_ref().is_some_and(|(bv, _)| bound <= *bv) {
             continue; // この下段では既知の最良を超えられない
         }
@@ -600,12 +598,8 @@ fn fl_search_best(dealt: &[Card], config: &CpuConfig) -> Option<(f64, [u32; 3])>
             let top_ub2 = top_upper_bound(&after_mid, m_cat, config);
             let stay_ub2 = stay_b
                 || (stay_top && m_cat >= Category::Trips as usize && trips_achievable(&after_mid));
-            let bound2 = f64::from(b_roy + m_roy + top_ub2)
-                + if stay_ub2 {
-                    config.fl_stay_value()
-                } else {
-                    0.0
-                };
+            let bound2 =
+                f64::from(b_roy + m_roy + top_ub2) + if stay_ub2 { stay_value } else { 0.0 };
             if best.as_ref().is_some_and(|(bv, _)| bound2 <= *bv) {
                 continue;
             }
@@ -626,8 +620,7 @@ fn fl_search_best(dealt: &[Card], config: &CpuConfig) -> Option<(f64, [u32; 3])>
                 }
                 let t_roy = royalty_points(Row::Top, &t_hand, &config.royalty);
                 let stay = stay_b || (stay_top && t_hand.category == Category::Trips);
-                let value = f64::from(b_roy + m_roy + t_roy)
-                    + if stay { config.fl_stay_value() } else { 0.0 };
+                let value = f64::from(b_roy + m_roy + t_roy) + if stay { stay_value } else { 0.0 };
                 if best.as_ref().is_none_or(|(bv, _)| value > *bv) {
                     best = Some((value, [b_mask, *m_mask, t_mask]));
                 }
@@ -723,6 +716,7 @@ fn trips_achievable(pool: &RankPool) -> bool {
 fn fl_sample_near(
     dealt: &[Card],
     config: &CpuConfig,
+    stay_value: f64,
     target: f64,
     rng: &mut Xorshift,
 ) -> Option<[u32; 3]> {
@@ -759,7 +753,7 @@ fn fl_sample_near(
         let stay = (config.fantasyland.stays_on_top_trips() && t_hand.category == Category::Trips)
             || (config.fantasyland.stays_on_bottom_quads_or_better()
                 && b_hand.category >= Category::Quads);
-        let value = f64::from(roy) + if stay { config.fl_stay_value() } else { 0.0 };
+        let value = f64::from(roy) + if stay { stay_value } else { 0.0 };
         let dist = (value - target).abs();
         if best.is_none_or(|(bd, _)| dist < bd) {
             best = Some((dist, [b_mask, m_mask, three]));

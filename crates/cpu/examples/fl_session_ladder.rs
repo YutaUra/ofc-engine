@@ -16,8 +16,6 @@ use ofc_engine_cpu::{CpuConfig, choose_fantasyland, choose_move_seeded};
 const STRENGTHS: [f64; 5] = [0.0, 0.25, 0.5, 0.75, 1.0];
 const SESSIONS_PER_PAIR: u64 = 200;
 const HANDS_PER_SESSION: u64 = 20;
-/// FL 継続時の配布枚数(標準では 14 枚固定が主流)。
-const FL_STAY_CARDS: u8 = 14;
 /// デッキのジョーカー枚数(チャイポ標準は 2)。
 const JOKERS: u8 = 2;
 
@@ -105,7 +103,7 @@ fn main() {
                         fl_next[player] = if fl_next[player] > 0 {
                             if fantasyland_stay(board, &fl_rules).unwrap_or(false) {
                                 fl_stays[strength_idx] += 1;
-                                FL_STAY_CARDS
+                                fl_next[player] // 継続は配布枚数を維持する
                             } else {
                                 0
                             }

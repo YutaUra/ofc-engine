@@ -79,7 +79,7 @@ fn main() {
                 let board = &resolved[p];
                 if fl_next[p] > 0 {
                     if fantasyland_stay(board, &fl_rules).unwrap_or(false) {
-                        fl_next[p] = 14;
+                        // 継続は配布枚数を維持する
                     } else {
                         fl_next[p] = 0;
                         entry_level[p] = None; // 連鎖終了
