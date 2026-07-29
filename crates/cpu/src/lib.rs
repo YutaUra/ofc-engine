@@ -20,12 +20,17 @@ use ofc_engine::joker::{RowArity, resolve_row};
 use ofc_engine::royalty::{Row, RoyaltyTable, royalty_points};
 use ofc_engine::{Board, Card, Rank};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CpuConfig {
     pub royalty: RoyaltyTable,
     pub fantasyland: FantasylandRules,
     /// 上段のペア形成(FL 突入)を優先するか。
     pub fl_aware: bool,
+    /// 強さ(0.0..=1.0)。各手番で貪欲方策を選ぶ確率(ε 混合)。
+    /// 0.0 = 常にランダム合法手、1.0 = 常に貪欲手。範囲外は丸める。
+    /// 1.0 未満で使うときは choose_move_seeded に手番ごとに異なる seed を
+    /// 渡すこと(同じ seed は同じ判定を再現する = 決定性の担保)。
+    pub strength: f64,
 }
 
 impl CpuConfig {
@@ -34,6 +39,7 @@ impl CpuConfig {
             royalty: RoyaltyTable::standard_american(),
             fantasyland: FantasylandRules::standard_progressive(),
             fl_aware: true,
+            strength: 1.0,
         }
     }
 }
@@ -46,6 +52,88 @@ const ROW_LIMITS: [usize; 3] = [3, 5, 5];
 /// だけで最良を更新するため)。
 /// 1 手分の着手(配置列と捨て札)。
 pub type Move = (Vec<Placement>, Option<Card>);
+
+/// strength(ε 混合)を考慮した着手選択。強さ 1.0 なら choose_move と同一。
+/// ランダム分岐も seed から決定的に引くため、同じ入力 + 同じ seed は
+/// 常に同じ手を返す。
+pub fn choose_move_seeded(
+    board: &Board,
+    dealt: &[Card],
+    street: Street,
+    config: &CpuConfig,
+    seed: u64,
+) -> Option<Move> {
+    let strength = config.strength.clamp(0.0, 1.0);
+    let mut rng = Xorshift::new(seed);
+    // 10000 分率で比較する(f64 の乱数を作らずに済ませるため)
+    let greedy = (rng.next() % 10_000) < (strength * 10_000.0) as u64;
+    if greedy {
+        choose_move(board, dealt, street, config)
+    } else {
+        random_legal_move(board, dealt, street, &mut rng)
+    }
+}
+
+/// ランダムな合法手(engine の random_move と同じ方針だが、GameState では
+/// なく盤面 + 配札 + 街から直接作る。ε 混合の乱数列を共有するため)。
+fn random_legal_move(
+    board: &Board,
+    dealt: &[Card],
+    street: Street,
+    rng: &mut Xorshift,
+) -> Option<Move> {
+    let mut dealt = dealt.to_vec();
+    let mut capacity = [
+        (RowKind::Top, 3 - board.top().len()),
+        (RowKind::Middle, 5 - board.middle().len()),
+        (RowKind::Bottom, 5 - board.bottom().len()),
+    ];
+    let discard = match street {
+        Street::Finished | Street::Fantasyland => return None,
+        Street::Initial => None,
+        Street::Draw(_) => {
+            let i = (rng.next() % dealt.len() as u64) as usize;
+            Some(dealt.swap_remove(i))
+        }
+    };
+    let placements = dealt
+        .into_iter()
+        .map(|card| {
+            let open: usize = capacity.iter().map(|(_, n)| n).sum();
+            let mut pick = (rng.next() % open as u64) as usize;
+            let slot = capacity
+                .iter_mut()
+                .find(|(_, n)| {
+                    if pick < *n {
+                        true
+                    } else {
+                        pick -= *n;
+                        false
+                    }
+                })
+                .expect("空きスロット合計から選ぶため必ず見つかる");
+            slot.1 -= 1;
+            Placement { card, row: slot.0 }
+        })
+        .collect();
+    Some((placements, discard))
+}
+
+/// 決定的な乱数(engine の shuffle と同系)。
+struct Xorshift(u64);
+
+impl Xorshift {
+    fn new(seed: u64) -> Self {
+        Self(seed.wrapping_add(0x9E37_79B9_7F4A_7C15))
+    }
+
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+}
 
 pub fn choose_move(
     board: &Board,

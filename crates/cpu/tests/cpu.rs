@@ -186,3 +186,124 @@ fn cpuはランダムより明確に強い() {
     }
     assert!(total > 0, "CPU の合計得点が正であるべき: {total}");
 }
+
+// ---- 強さパラメータ(strength) ----
+
+#[test]
+fn 強さは0から1の範囲に丸められる() {
+    let board = Board::new(vec![], vec![], vec![]).unwrap();
+    let dealt = cards(&["As", "Kd", "9h", "5c", "2s"]);
+    let mut config = config();
+    config.strength = 1.5;
+    assert!(
+        ofc_engine_cpu::choose_move_seeded(&board, &dealt, Street::Initial, &config, 1).is_some()
+    );
+    config.strength = -0.5;
+    assert!(
+        ofc_engine_cpu::choose_move_seeded(&board, &dealt, Street::Initial, &config, 1).is_some()
+    );
+}
+
+#[test]
+fn 強さ1は常に貪欲手と一致する() {
+    let board = Board::new(vec![], vec![], vec![]).unwrap();
+    let dealt = cards(&["As", "Kd", "9h", "5c", "2s"]);
+    let cfg = config(); // strength = 1.0
+    for seed in 0..10 {
+        assert_eq!(
+            ofc_engine_cpu::choose_move_seeded(&board, &dealt, Street::Initial, &cfg, seed),
+            choose_move(&board, &dealt, Street::Initial, &cfg),
+        );
+    }
+}
+
+#[test]
+fn 強さ0はシードによって貪欲手以外も返す() {
+    let board = Board::new(vec![], vec![], vec![]).unwrap();
+    let dealt = cards(&["As", "Kd", "9h", "5c", "2s"]);
+    let mut cfg = config();
+    cfg.strength = 0.0;
+    let greedy = choose_move(&board, &dealt, Street::Initial, &config());
+    let diverged = (0..50).any(|seed| {
+        ofc_engine_cpu::choose_move_seeded(&board, &dealt, Street::Initial, &cfg, seed) != greedy
+    });
+    assert!(diverged, "強さ 0 が常に貪欲手と一致するのはおかしい");
+}
+
+#[test]
+fn 中間の強さでも手は常に合法() {
+    use ofc_engine::game::GameState;
+    for game_seed in 0..10 {
+        let mut state = GameState::new(2, 1, game_seed).unwrap();
+        let mut cfg = config();
+        cfg.strength = 0.5;
+        let mut move_seed = 100 + game_seed;
+        while state.street() != Street::Finished {
+            let (p, d) = ofc_engine_cpu::choose_move_seeded(
+                state.board(state.current_player()),
+                state.dealt_cards(),
+                state.street(),
+                &cfg,
+                move_seed,
+            )
+            .unwrap();
+            state.apply(&p, d).unwrap();
+            move_seed += 1;
+        }
+    }
+}
+
+#[test]
+fn 同じシードなら中間の強さでも決定的() {
+    let board = Board::new(vec![], vec![], vec![]).unwrap();
+    let dealt = cards(&["As", "Kd", "9h", "5c", "2s"]);
+    let mut cfg = config();
+    cfg.strength = 0.3;
+    assert_eq!(
+        ofc_engine_cpu::choose_move_seeded(&board, &dealt, Street::Initial, &cfg, 7),
+        ofc_engine_cpu::choose_move_seeded(&board, &dealt, Street::Initial, &cfg, 7),
+    );
+}
+
+#[test]
+fn 強さは実戦の強さと単調に対応する() {
+    // 隣接する強さ同士を対戦させ、強い側が勝ち越すことを確認する
+    // (全 5 段階の総当たり検証は examples/strength_ladder.rs で実施)
+    use ofc_engine::game::GameState;
+    let royalty = RoyaltyTable::standard_american();
+    let scoring = ScoringRules::standard();
+    for (weak, strong) in [(0.0, 0.5), (0.5, 1.0)] {
+        let mut cfg_weak = config();
+        cfg_weak.strength = weak;
+        let mut cfg_strong = config();
+        cfg_strong.strength = strong;
+        let mut total = 0i32;
+        for game_seed in 0..100 {
+            let mut state = GameState::new(2, 0, game_seed).unwrap();
+            let mut move_seed = game_seed.wrapping_mul(97);
+            while state.street() != Street::Finished {
+                let cfg = if state.current_player() == 0 {
+                    &cfg_strong
+                } else {
+                    &cfg_weak
+                };
+                let (p, d) = ofc_engine_cpu::choose_move_seeded(
+                    state.board(state.current_player()),
+                    state.dealt_cards(),
+                    state.street(),
+                    cfg,
+                    move_seed,
+                )
+                .unwrap();
+                state.apply(&p, d).unwrap();
+                move_seed = move_seed.wrapping_add(1);
+            }
+            let (p0, _) = score_pair(state.board(0), state.board(1), &royalty, &scoring).unwrap();
+            total += p0;
+        }
+        assert!(
+            total > 0,
+            "strength {strong} は {weak} に勝ち越すべき: total={total}"
+        );
+    }
+}
