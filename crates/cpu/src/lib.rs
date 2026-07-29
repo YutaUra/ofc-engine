@@ -26,9 +26,16 @@ pub struct CpuConfig {
     pub fantasyland: FantasylandRules,
     /// 上段のペア形成(FL 突入)を優先するか。
     pub fl_aware: bool,
-    /// FL 継続の価値(点数換算)。FL 配置の価値 = 素点 + 継続ならこの値。
-    /// 既定 6.0 は「FL 1 回の平均的な得点優位」の保守的な見積もり。
-    pub fl_stay_value: f64,
+    /// FL 突入の差分価値 φ̂(配布枚数 14/15/16/17 の順、ロイヤリティ点単位)。
+    /// 既定値は本 crate のセッション自己対戦で実測した連鎖価値
+    /// (examples/fl_phi_measure.rs、平場基準補正済み)。solver の理論 φ
+    /// (QQ=7.9/KK=18.9/AA=39.3)より勾配が平坦なのは、継続ルールが
+    /// 「常に 14 枚」のため上位突入の優位が 1 ハンド目で薄まるから。
+    /// 17 枚はサンプル不足のため solver 値を暫定使用。
+    pub fl_entry_values: [f64; 4],
+    /// FL 継続時の配布枚数(ローカルルール。既定 14)。
+    /// 継続の追加価値は「そのレベルの FL をもう一周」なので φ(この枚数)。
+    pub fl_stay_cards: u8,
     /// 強さ(0.0..=1.0)。各手番で貪欲方策を選ぶ確率(ε 混合)。
     /// 0.0 = 常にランダム合法手、1.0 = 常に貪欲手。範囲外は丸める。
     /// 1.0 未満で使うときは choose_move_seeded に手番ごとに異なる seed を
@@ -37,12 +44,23 @@ pub struct CpuConfig {
 }
 
 impl CpuConfig {
+    /// 配布枚数(14..=17)に対応する φ。
+    pub fn fl_value_for_cards(&self, cards: u8) -> f64 {
+        self.fl_entry_values[(cards.clamp(14, 17) - 14) as usize]
+    }
+
+    /// FL 継続の追加価値 = φ(継続時の配布枚数)。
+    pub fn fl_stay_value(&self) -> f64 {
+        self.fl_value_for_cards(self.fl_stay_cards)
+    }
+
     pub fn standard() -> Self {
         Self {
             royalty: RoyaltyTable::standard_american(),
             fantasyland: FantasylandRules::standard_progressive(),
             fl_aware: true,
-            fl_stay_value: 6.0,
+            fl_entry_values: [29.9, 36.9, 46.1, 84.1],
+            fl_stay_cards: 14,
             strength: 1.0,
         }
     }
@@ -326,7 +344,8 @@ fn greedy_score(rows: &[Vec<Card>; 3], config: &CpuConfig) -> i64 {
     // made/pressure 項に埋もれて意思決定が一度も覆らない。
     let fl_bonus =
         if config.fl_aware && strengths[0] <= strengths[1] && strengths[0] <= strengths[2] {
-            fl_setup_bonus(&rows[0]) * 75
+            // φ はロイヤリティ点単位なので、ロイヤリティ項と同じ ×2000 で換算する
+            (fl_setup_bonus(&rows[0], config) * 2000.0) as i64
         } else {
             0
         };
@@ -393,12 +412,19 @@ fn evaluate_completed_row(idx: usize, cards: &[Card], others: &[Card]) -> HandRa
     }
 }
 
-/// 上段の FL 突入ポテンシャルへのボーナス。
+/// 上段の FL 突入ポテンシャルへのボーナス(φ 傾斜)。
 /// 素朴な行バランス項(高札を上段から遠ざける)が FL 突入価値を殺すのを
-/// 相殺する。係数は chinese-poker-solver が rollout との A/B で調整した値に
-/// 準拠した近似(トリップス濃厚 +80 / QQ 以上ペア +30 / ペア + 空き +40 /
-/// Q 以上単騎 + 空き +8)。該当項の最大値のみ与える。
-fn fl_setup_bonus(top: &[Card]) -> i64 {
+/// 相殺する。値は突入レベル別の φ(config.fl_entry_values)で、
+/// 完成形はその φ、未完成の潜在形は割引した φ を与える。
+/// 一律ボーナスだと「KK/AA を狙えるのに QQ で妥協する」歪みが出る。
+/// 突入ハント(通常ハンド方策)に φ を反映する強度。
+/// φ は「完璧に近い突入変換」を前提とした差分価値であり、単発貪欲が
+/// 額面どおり支払うと平場の行力を売りすぎて総得点が下がることが
+/// セッション検証で判明した(1.0 で +1.55/hand、baseline +1.88)。
+/// 値はセッション総得点の掃引で校正する。
+const FL_HUNT_SCALE: f64 = 0.075;
+
+fn fl_setup_bonus(top: &[Card], config: &CpuConfig) -> f64 {
     let mut counts = [0u8; 13];
     let mut jokers = 0u8;
     for card in top {
@@ -412,28 +438,37 @@ fn fl_setup_bonus(top: &[Card]) -> i64 {
     let best_single_rank = (0..13).rev().find(|r| counts[*r] >= 1);
     let has_open_slot = top.len() < 3;
 
-    let mut bonus = 0i64;
+    let phi_for_pair_rank = |rank: usize| -> f64 {
+        match rank {
+            r if r == Rank::Queen as usize => config.fl_value_for_cards(14),
+            r if r == Rank::King as usize => config.fl_value_for_cards(15),
+            r if r == Rank::Ace as usize => config.fl_value_for_cards(16),
+            _ => 0.0,
+        }
+    };
+
+    let mut bonus = 0.0f64;
+    // トリップス(17 枚突入)濃厚
     if max_count + jokers >= 3 && top.len() >= 2 {
-        bonus = bonus.max(80);
+        bonus = bonus.max(config.fl_value_for_cards(17));
     }
+    // QQ 以上の完成ペア(Joker 補完込み)
     let paired_with_joker =
         best_paired_rank.or_else(|| (jokers >= 1).then_some(best_single_rank).flatten());
     if let Some(rank) = paired_with_joker
-        && rank >= Rank::Queen as usize
         && (counts[rank] >= 2 || jokers >= 1)
     {
-        bonus = bonus.max(30);
+        bonus = bonus.max(phi_for_pair_rank(rank));
     }
-    if best_paired_rank.is_some() && has_open_slot {
-        bonus = bonus.max(40);
-    }
+    // 潜在形(未完成)の割引は小さく抑える。0.2×φ 級にすると
+    // 「エースを top に寝かせて AA を待つ」動きが平場の行力を削り、
+    // セッション総得点が下がることが検証で判明した(+1.88→+1.55/hand)。
     if let Some(rank) = best_single_rank
-        && rank >= Rank::Queen as usize
         && has_open_slot
     {
-        bonus = bonus.max(8);
+        bonus = bonus.max(0.05 * phi_for_pair_rank(rank));
     }
-    bonus
+    bonus * FL_HUNT_SCALE
 }
 
 // ---- Fantasyland 配置方策 ----
@@ -449,7 +484,7 @@ pub fn fantasyland_value(board: &Board, config: &CpuConfig) -> f64 {
     }
     let stay = ofc_engine::fantasyland::fantasyland_stay(&eval.resolved, &config.fantasyland)
         .unwrap_or(false);
-    f64::from(eval.royalty_total) + if stay { config.fl_stay_value } else { 0.0 }
+    f64::from(eval.royalty_total) + if stay { config.fl_stay_value() } else { 0.0 }
 }
 
 /// FL の一括配置を選ぶ(13 枚配置 + 残り捨て)。
@@ -550,7 +585,7 @@ fn fl_search_best(dealt: &[Card], config: &CpuConfig) -> Option<(f64, [u32; 3])>
         let stay_ub = stay_b
             || (stay_top && b_cat >= Category::Trips as usize && trips_achievable(&remaining));
         let bound = f64::from(b_roy + mid_prefix_max[b_cat] + top_ub)
-            + if stay_ub { config.fl_stay_value } else { 0.0 };
+            + if stay_ub { config.fl_stay_value() } else { 0.0 };
         if best.as_ref().is_some_and(|(bv, _)| bound <= *bv) {
             continue; // この下段では既知の最良を超えられない
         }
@@ -566,7 +601,11 @@ fn fl_search_best(dealt: &[Card], config: &CpuConfig) -> Option<(f64, [u32; 3])>
             let stay_ub2 = stay_b
                 || (stay_top && m_cat >= Category::Trips as usize && trips_achievable(&after_mid));
             let bound2 = f64::from(b_roy + m_roy + top_ub2)
-                + if stay_ub2 { config.fl_stay_value } else { 0.0 };
+                + if stay_ub2 {
+                    config.fl_stay_value()
+                } else {
+                    0.0
+                };
             if best.as_ref().is_some_and(|(bv, _)| bound2 <= *bv) {
                 continue;
             }
@@ -588,7 +627,7 @@ fn fl_search_best(dealt: &[Card], config: &CpuConfig) -> Option<(f64, [u32; 3])>
                 let t_roy = royalty_points(Row::Top, &t_hand, &config.royalty);
                 let stay = stay_b || (stay_top && t_hand.category == Category::Trips);
                 let value = f64::from(b_roy + m_roy + t_roy)
-                    + if stay { config.fl_stay_value } else { 0.0 };
+                    + if stay { config.fl_stay_value() } else { 0.0 };
                 if best.as_ref().is_none_or(|(bv, _)| value > *bv) {
                     best = Some((value, [b_mask, *m_mask, t_mask]));
                 }
@@ -720,7 +759,7 @@ fn fl_sample_near(
         let stay = (config.fantasyland.stays_on_top_trips() && t_hand.category == Category::Trips)
             || (config.fantasyland.stays_on_bottom_quads_or_better()
                 && b_hand.category >= Category::Quads);
-        let value = f64::from(roy) + if stay { config.fl_stay_value } else { 0.0 };
+        let value = f64::from(roy) + if stay { config.fl_stay_value() } else { 0.0 };
         let dist = (value - target).abs();
         if best.is_none_or(|(bd, _)| dist < bd) {
             best = Some((dist, [b_mask, m_mask, three]));
