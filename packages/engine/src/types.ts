@@ -135,3 +135,15 @@ export interface GameResult {
 
 export type GameApiResult = GameResult | EngineError;
 export type GameViewResult = GameView | EngineError;
+
+// ---- CPU プレイヤー API ----
+
+export interface CpuOptions {
+  /**
+   * 0.0(最弱)〜 1.0(最強)。獲得利得が strength におおむね比例する
+   * よう自己対戦で較正済み(範囲外は丸め)。
+   */
+  strength: number;
+  /** 乱数シード。ハンドごとに変える(同シード同入力は同じ手を返す)。 */
+  seed: number | bigint | string;
+}

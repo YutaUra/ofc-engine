@@ -165,3 +165,35 @@ fn flゲームは一括配置で完了しviewにflフェーズが出る() {
         serde_json::json!({ "phase": "initial" })
     );
 }
+
+#[test]
+fn cpuが通常手番とfl手番を打ってゲームを完走できる() {
+    use ofc_engine_wasm::game_cpu_apply_json;
+    // FL 込みのゲームを CPU 同士で最後まで
+    let out = ofc_engine_wasm::game_new_fl_json(2, 2, "11", "[14, 0]");
+    let mut parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let mut state = parsed["state"].as_str().unwrap().to_string();
+    let mut seed = 1000u64;
+    while parsed["view"]["street"]["phase"] != "finished" {
+        let options = serde_json::json!({ "strength": 0.7, "seed": seed }).to_string();
+        let out = game_cpu_apply_json(&state, &options);
+        parsed = serde_json::from_str(&out).unwrap();
+        assert!(parsed["error"].is_null(), "{out}");
+        state = parsed["state"].as_str().unwrap().to_string();
+        seed += 1;
+    }
+    for board in parsed["view"]["boards"].as_array().unwrap() {
+        assert_eq!(board["bottom"].as_array().unwrap().len(), 5);
+    }
+}
+
+#[test]
+fn cpuの強さは範囲外でも丸められエラーにならない() {
+    use ofc_engine_wasm::game_cpu_apply_json;
+    let out = ofc_engine_wasm::game_new_json(2, 0, "5");
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let state = parsed["state"].as_str().unwrap();
+    let out = game_cpu_apply_json(state, r#"{"strength": 1.5, "seed": 1}"#);
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert!(parsed["error"].is_null(), "{out}");
+}

@@ -266,3 +266,93 @@ fn view_of(state: &GameState) -> GameView {
         boards: state.boards().to_vec(),
     }
 }
+
+// ---- CPU プレイヤー(着手選択)の JSON API ----
+
+use ofc_engine::game::Street as EngineStreet;
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CpuOptionsWire {
+    /// 0.0(最弱)..=1.0(最強)。獲得利得がおおむね比例するよう較正済み。
+    strength: f64,
+    /// 乱数シード(強さの確率混合・FL 帯選択用)。ハンドごとに変えること。
+    seed: u64,
+}
+
+/// 現在手番の着手を CPU が選び、そのまま適用して次状態を返す。
+/// 通常手番・FL 手番の両方に対応。ルールは標準チャイポ
+/// (アメリカンロイヤリティ / progressive FL)。
+#[wasm_bindgen]
+pub fn game_cpu_apply_json(state_json: &str, options_json: &str) -> String {
+    to_json(cpu_apply_impl(state_json, options_json))
+}
+
+/// オープニングブック(縮約エクスポートのテキスト)を登録する。
+/// 登録すると strength 上位帯の初手がテーブル引きになる。
+#[wasm_bindgen]
+pub fn cpu_load_opening_book(book_text: &str) -> String {
+    match ofc_engine_cpu::OpeningBook::from_text(book_text) {
+        Ok(book) => {
+            let hands = book.len();
+            ofc_engine_cpu::set_opening_book(book);
+            format!(r#"{{"hands":{hands}}}"#)
+        }
+        Err(e) => to_json::<()>(Err(format!("book: {e}"))),
+    }
+}
+
+fn cpu_apply_impl(state_json: &str, options_json: &str) -> Result<GameOut, String> {
+    let mut state = parse_state(state_json)?;
+    let options: CpuOptionsWire =
+        serde_json::from_str(options_json).map_err(|e| format!("options: {e}"))?;
+    let mut config = ofc_engine_cpu::CpuConfig::standard();
+    config.strength = options.strength;
+
+    match state.street() {
+        EngineStreet::Finished => return Err("GameFinished".to_string()),
+        EngineStreet::Fantasyland => {
+            let (placements, discards) =
+                ofc_engine_cpu::choose_fantasyland(state.dealt_cards(), &config, options.seed)
+                    .ok_or("FL の着手を選べませんでした")?;
+            state
+                .apply_fantasyland(&placements, &discards)
+                .map_err(|e| format!("{e:?}"))?;
+        }
+        _ => {
+            // dead = 相手の公開盤面(自分の捨て札は GameState が保持しないため
+            // 含まれない。ソリティア評価の近似としては公開盤面が支配的)
+            let me = state.current_player();
+            let mut dead: Vec<Card> = Vec::new();
+            for (i, board) in state.boards().iter().enumerate() {
+                if i != me {
+                    dead.extend(
+                        board
+                            .top()
+                            .iter()
+                            .chain(board.middle())
+                            .chain(board.bottom()),
+                    );
+                }
+            }
+            let ctx = ofc_engine_cpu::DeadContext {
+                jokers: state.joker_count(),
+                dead,
+                hand_seed: Some(options.seed),
+            };
+            let (placements, discard) = ofc_engine_cpu::choose_move_ctx(
+                state.board(me),
+                state.dealt_cards(),
+                state.street(),
+                &ctx,
+                &config,
+                options.seed,
+            )
+            .ok_or("着手を選べませんでした")?;
+            state
+                .apply(&placements, discard)
+                .map_err(|e| format!("{e:?}"))?;
+        }
+    }
+    game_out(&state)
+}

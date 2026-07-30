@@ -4,8 +4,10 @@
  */
 
 import init, {
+  cpu_load_opening_book,
   evaluate_board_json,
   game_apply_json,
+  game_cpu_apply_json,
   game_new_fl_json,
   game_new_json,
   game_view_json,
@@ -16,6 +18,8 @@ import init, {
 import type {
   Board,
   Card,
+  CpuOptions,
+  EngineError,
   EvaluateBoardResult,
   GameApiResult,
   GamePlacement,
@@ -58,6 +62,17 @@ export interface Engine {
   ): GameApiResult;
   /** 保存済み state から現在状態を再構築する(中断復帰)。 */
   gameView(state: GameStateBlob): GameViewResult;
+  /**
+   * 現在手番の着手を CPU が選び、そのまま適用して次状態を返す
+   * (通常手番・FL 手番の両対応。ルールは標準チャイポ)。
+   */
+  cpuApply(state: GameStateBlob, options: CpuOptions): GameApiResult;
+  /**
+   * オープニングブック(縮約エクスポートのテキスト)を登録する。
+   * 登録すると strength 上位帯の初手がテーブル引きになる(任意)。
+   * 戻り値は登録した正準手数、失敗時は EngineError。
+   */
+  loadOpeningBook(bookText: string): { hands: number } | EngineError;
 }
 
 /**
@@ -92,5 +107,14 @@ export async function createEngine(wasmInput?: InitInput): Promise<Engine> {
         game_apply_json(state, JSON.stringify(placements), JSON.stringify(discard)),
       ) as GameApiResult,
     gameView: (state) => JSON.parse(game_view_json(state)) as GameViewResult,
+    cpuApply: (state, options) =>
+      JSON.parse(
+        game_cpu_apply_json(
+          state,
+          JSON.stringify({ strength: options.strength, seed: Number(options.seed) }),
+        ),
+      ) as GameApiResult,
+    loadOpeningBook: (bookText) =>
+      JSON.parse(cpu_load_opening_book(bookText)) as { hands: number } | EngineError,
   };
 }

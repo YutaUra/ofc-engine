@@ -293,6 +293,7 @@ name = "ofc-engine-wasm"
 version = "0.1.0"
 dependencies = [
  "ofc-engine",
+ "ofc-engine-cpu",
  "serde",
  "serde_json",
  "wasm-bindgen",

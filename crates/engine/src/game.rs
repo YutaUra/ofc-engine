@@ -190,6 +190,14 @@ impl GameState {
         &self.boards
     }
 
+    /// デッキに含まれるジョーカーの枚数(CPU の live デッキ復元用)。
+    pub fn joker_count(&self) -> u8 {
+        self.deck
+            .iter()
+            .filter(|c| matches!(c, Card::Joker))
+            .count() as u8
+    }
+
     /// 手番プレイヤーの配置(+捨て札)を適用し、次の手番に進める。
     pub fn apply(
         &mut self,
