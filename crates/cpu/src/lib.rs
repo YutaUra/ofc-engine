@@ -18,7 +18,7 @@ use ofc_engine::game::{Placement, RowKind, Street};
 use ofc_engine::hand::{Category, HandRank, evaluate_five, evaluate_three};
 use ofc_engine::joker::{RowArity, resolve_row};
 use ofc_engine::royalty::{Row, RoyaltyTable, royalty_points};
-use ofc_engine::{Board, Card, Rank};
+use ofc_engine::{Board, Card, Rank, Suit};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CpuConfig {
@@ -35,6 +35,8 @@ pub struct CpuConfig {
     /// 概算の外挿値。
     pub fl_phi_table: [[f64; 4]; 11],
 
+    /// strength 1.0(rollout)の探索予算。
+    pub rollout: RolloutBudget,
     /// 強さ(0.0..=1.0)。各手番で貪欲方策を選ぶ確率(ε 混合)。
     /// 0.0 = 常にランダム合法手、1.0 = 常に貪欲手。範囲外は丸める。
     /// 1.0 未満で使うときは choose_move_seeded に手番ごとに異なる seed を
@@ -58,6 +60,7 @@ impl CpuConfig {
             royalty: RoyaltyTable::standard_american(),
             fantasyland: FantasylandRules::standard_progressive(),
             fl_aware: true,
+            rollout: RolloutBudget::default(),
             // examples/fl_phi_measure.rs の実測(4,000 セッション/点)。
             // 17 枚列はサンプル希少のため「AA(16 枚)以上」を下限に平滑化。
             // s=0.9→1.0 で跳ねるのは、帯選択の「最適よりわずかに下」の配置が
@@ -830,4 +833,208 @@ impl RankAllCpu for Rank {
         Rank::King,
         Rank::Ace,
     ];
+}
+
+// ---- CRN rollout(最上位 strength の着手選択) ----
+
+/// rollout の予算。samples は [初手, 街1, 街2, 街3] の CRN サンプル数。
+/// 既定値はモバイル実機で 1 手数十 ms を狙う構成(solver の目安
+/// 「30〜60 本 × 上位 K≈8」に準拠。街 3 は playout が最終街のみで
+/// 軽いため多めに割く)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RolloutBudget {
+    /// 貪欲ランク上位いくつを rollout するか。小さすぎると FL 狙いの
+    /// 正解を落とす(solver の経験則)。
+    pub top_k: usize,
+    pub samples: [u32; 4],
+}
+
+impl Default for RolloutBudget {
+    fn default() -> Self {
+        Self {
+            top_k: 8,
+            samples: [60, 60, 80, 200],
+        }
+    }
+}
+
+/// rollout に必要な盤面外の情報。
+/// dead には「自分の捨て札 + 相手の公開盤面」など見えている消費札を渡す。
+/// 相手はシミュレートしない(ソリティア値。solver の設計判断に準拠)。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DeadContext {
+    /// デッキのジョーカー枚数(live デッキの復元に必要)。
+    pub jokers: u8,
+    pub dead: Vec<Card>,
+}
+
+/// strength 1.0 で CRN rollout を使う着手選択。strength < 1.0 は
+/// choose_move_seeded(ε 混合貪欲)へ委譲する。
+/// 街 4 は従来どおり厳密全列挙、街 3 以前は「貪欲上位 K 候補 ×
+/// CRN サンプルの貪欲 playout 平均」で選ぶ。
+pub fn choose_move_ctx(
+    board: &Board,
+    dealt: &[Card],
+    street: Street,
+    ctx: &DeadContext,
+    config: &CpuConfig,
+    seed: u64,
+) -> Option<Move> {
+    if config.strength.clamp(0.0, 1.0) < 1.0 {
+        return choose_move_seeded(board, dealt, street, config, seed);
+    }
+    match street {
+        Street::Finished | Street::Fantasyland => None,
+        Street::Draw(4) => choose_move(board, dealt, street, config),
+        _ => rollout_choose(board, dealt, street, ctx, config, seed),
+    }
+}
+
+fn rollout_choose(
+    board: &Board,
+    dealt: &[Card],
+    street: Street,
+    ctx: &DeadContext,
+    config: &CpuConfig,
+    seed: u64,
+) -> Option<Move> {
+    let candidates = enumerate_moves(board, dealt, street)?;
+    // 貪欲スコアで事前ランクし、上位 K のみ rollout する
+    let mut ranked: Vec<(MoveScore, Move)> = candidates
+        .into_iter()
+        .map(|mv| (score_move(board, &mv, false, config), mv))
+        .collect();
+    ranked.sort_by(|a, b| b.0.cmp(&a.0));
+    ranked.truncate(config.rollout.top_k);
+
+    let live = live_deck(board, dealt, ctx);
+    let (street_idx, draws_needed) = match street {
+        Street::Initial => (0usize, 12usize),
+        Street::Draw(n) => (n as usize, (4 - n as usize) * 3),
+        _ => unreachable!("rollout_choose は Initial/Draw(1..=3) のみ"),
+    };
+    let samples = config.rollout.samples[street_idx.min(3)];
+
+    let mut totals = vec![0.0f64; ranked.len()];
+    let mut scenario = Vec::with_capacity(draws_needed);
+    for index in 0..samples {
+        // CRN: 全候補が同一 index の scenario を共有する(運が相殺され、
+        // 候補間の EV 差の分散が激減する。CRN なしの少サンプルは
+        // 事実上ランダム選択に退化する — solver の注意点)
+        crn_scenario(seed, u64::from(index), &live, draws_needed, &mut scenario);
+        for (i, (_, mv)) in ranked.iter().enumerate() {
+            totals[i] += playout_value(board, mv, street, &scenario, config);
+        }
+    }
+
+    let best = totals
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.partial_cmp(b.1).expect("値は有限"))
+        .map(|(i, _)| i)?;
+    Some(ranked.swap_remove(best).1)
+}
+
+/// live デッキ = 全カード − 盤面 − 手札 − dead(ジョーカーは枚数で復元)。
+fn live_deck(board: &Board, dealt: &[Card], ctx: &DeadContext) -> Vec<Card> {
+    let mut used: Vec<Card> = Vec::with_capacity(30);
+    used.extend(
+        board
+            .top()
+            .iter()
+            .chain(board.middle())
+            .chain(board.bottom()),
+    );
+    used.extend(dealt);
+    used.extend(&ctx.dead);
+    let joker_used = used.iter().filter(|c| matches!(c, Card::Joker)).count() as u8;
+
+    let suits = [Suit::Spades, Suit::Hearts, Suit::Diamonds, Suit::Clubs];
+    let mut live: Vec<Card> = Rank::ALL_CPU
+        .iter()
+        .flat_map(|r| suits.map(|s| Card::Standard { rank: *r, suit: s }))
+        .filter(|c| !used.contains(c))
+        .collect();
+    for _ in joker_used..ctx.jokers {
+        live.push(Card::Joker);
+    }
+    live
+}
+
+/// (seed, index) から決定的に scenario(live デッキ先頭 need 枚の並び)を作る。
+fn crn_scenario(seed: u64, index: u64, live: &[Card], need: usize, out: &mut Vec<Card>) {
+    // SplitMix64 で index ごとに独立したシードを作る
+    let mut z = seed ^ index.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    let mut rng = Xorshift::new(z ^ (z >> 31));
+
+    // 部分 Fisher-Yates: 先頭 need 枚だけ確定させる
+    out.clear();
+    let mut pool = live.to_vec();
+    for _ in 0..need.min(pool.len()) {
+        let i = (rng.next() % pool.len() as u64) as usize;
+        out.push(pool.swap_remove(i));
+    }
+}
+
+/// 候補手を適用し、残りの街を貪欲(最終街のみ厳密)で打ち切り、終端価値を返す。
+/// 終端価値 = ファウルなら 0、非ファウルなら自分のロイヤリティ +
+/// FL 突入なら φ̂(枚数)。相手との差分は取らない(ソリティア値)。
+/// playout が貪欲なので φ̂ も貪欲実現ベースの実測値と整合する
+/// (完璧プレイ前提の φ を足すと FL を過大評価する — solver の注意点)。
+fn playout_value(
+    board: &Board,
+    (placements, _discard): &Move,
+    street: Street,
+    scenario: &[Card],
+    config: &CpuConfig,
+) -> f64 {
+    let mut rows = [
+        board.top().to_vec(),
+        board.middle().to_vec(),
+        board.bottom().to_vec(),
+    ];
+    for p in placements {
+        let idx = ROW_KINDS.iter().position(|r| *r == p.row).expect("3 行");
+        rows[idx].push(p.card);
+    }
+
+    let mut next_street = match street {
+        Street::Initial => 1u8,
+        Street::Draw(n) => n + 1,
+        _ => unreachable!(),
+    };
+    let mut cursor = 0usize;
+    while next_street <= 4 {
+        if cursor + 3 > scenario.len() {
+            return 0.0; // live デッキ不足(通常の対戦では起きない)
+        }
+        let dealt = &scenario[cursor..cursor + 3];
+        cursor += 3;
+        let current = Board::new(rows[0].clone(), rows[1].clone(), rows[2].clone())
+            .expect("playout 中の盤面は常に有効");
+        let Some((placements, _)) = choose_move(&current, dealt, Street::Draw(next_street), config)
+        else {
+            return 0.0;
+        };
+        for p in &placements {
+            let idx = ROW_KINDS.iter().position(|r| *r == p.row).expect("3 行");
+            rows[idx].push(p.card);
+        }
+        next_street += 1;
+    }
+
+    let [top, middle, bottom] = rows;
+    let final_board = Board::new(top, middle, bottom).expect("13 枚の完成盤面");
+    let eval = evaluate_board(&final_board, &[], &config.royalty, &config.fantasyland)
+        .expect("完成盤面の評価は失敗しない");
+    if eval.foul {
+        return 0.0;
+    }
+    f64::from(eval.royalty_total)
+        + eval
+            .fantasyland_cards
+            .map(|cards| config.fl_value_for_cards(cards))
+            .unwrap_or(0.0)
 }

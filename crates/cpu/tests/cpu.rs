@@ -307,3 +307,84 @@ fn 強さは実戦の強さと単調に対応する() {
         );
     }
 }
+
+// ---- CRN rollout(strength 1.0) ----
+
+fn rollout_config() -> CpuConfig {
+    let mut cfg = config();
+    // テストは小さい予算で回す(既定はモバイル向けで重い)
+    cfg.rollout = ofc_engine_cpu::RolloutBudget {
+        top_k: 4,
+        samples: [8, 8, 8, 16],
+    };
+    cfg
+}
+
+#[test]
+fn rolloutの手は常に合法でゲームを完走できる() {
+    use ofc_engine::game::GameState;
+    use ofc_engine_cpu::{DeadContext, choose_move_ctx};
+    for game_seed in 0..5 {
+        let jokers = (game_seed % 3) as u8;
+        let mut state = GameState::new(2, jokers, game_seed).unwrap();
+        let mut discards: [Vec<Card>; 2] = [vec![], vec![]];
+        let mut move_seed = 900 + game_seed;
+        while state.street() != Street::Finished {
+            let p = state.current_player();
+            let opp = 1 - p;
+            let mut dead = discards[p].clone();
+            let ob = state.board(opp);
+            dead.extend(ob.top().iter().chain(ob.middle()).chain(ob.bottom()));
+            let ctx = DeadContext { jokers, dead };
+            let (placements, discard) = choose_move_ctx(
+                state.board(p),
+                state.dealt_cards(),
+                state.street(),
+                &ctx,
+                &rollout_config(),
+                move_seed,
+            )
+            .unwrap();
+            if let Some(d) = discard {
+                discards[p].push(d);
+            }
+            state.apply(&placements, discard).unwrap();
+            move_seed += 1;
+        }
+        assert!(state.board(0).is_complete() && state.board(1).is_complete());
+    }
+}
+
+#[test]
+fn rolloutは同じ入力と同じシードで決定的() {
+    use ofc_engine_cpu::{DeadContext, choose_move_ctx};
+    let board = Board::new(vec![], vec![], vec![]).unwrap();
+    let dealt = cards(&["As", "Kd", "9h", "5c", "2s"]);
+    let ctx = DeadContext {
+        jokers: 0,
+        dead: vec![],
+    };
+    assert_eq!(
+        choose_move_ctx(&board, &dealt, Street::Initial, &ctx, &rollout_config(), 7),
+        choose_move_ctx(&board, &dealt, Street::Initial, &ctx, &rollout_config(), 7),
+    );
+}
+
+#[test]
+fn strengthが1未満ならrolloutではなく確率混合に委譲される() {
+    use ofc_engine_cpu::{DeadContext, choose_move_ctx};
+    let board = Board::new(vec![], vec![], vec![]).unwrap();
+    let dealt = cards(&["As", "Kd", "9h", "5c", "2s"]);
+    let ctx = DeadContext {
+        jokers: 0,
+        dead: vec![],
+    };
+    let mut cfg = rollout_config();
+    cfg.strength = 0.7;
+    for seed in 0..5 {
+        assert_eq!(
+            choose_move_ctx(&board, &dealt, Street::Initial, &ctx, &cfg, seed),
+            ofc_engine_cpu::choose_move_seeded(&board, &dealt, Street::Initial, &cfg, seed),
+        );
+    }
+}
