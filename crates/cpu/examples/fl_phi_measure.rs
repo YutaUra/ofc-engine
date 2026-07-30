@@ -9,21 +9,31 @@ use ofc_engine::fantasyland::{FantasylandRules, fantasyland_entry, fantasyland_s
 use ofc_engine::game::{GameState, Street};
 use ofc_engine::royalty::RoyaltyTable;
 use ofc_engine::scoring::{ScoringRules, score_pair};
-use ofc_engine_cpu::{CpuConfig, choose_fantasyland, choose_move_seeded};
+use ofc_engine_cpu::{CpuConfig, DeadContext, choose_fantasyland, choose_move_ctx};
 
 const SESSIONS: u64 = 4000;
 const HANDS: u64 = 20;
 
 fn main() {
+    // 引数で対象 strength(0..=10 の整数)を絞れる。例: `-- 10` は s=1 のみ
+    // (s=1 は rollout で重いため、部分再測定に使う)
+    let only: Option<u64> = std::env::args().nth(1).and_then(|a| a.parse().ok());
+    let sessions: u64 = std::env::args()
+        .nth(2)
+        .and_then(|a| a.parse().ok())
+        .unwrap_or(SESSIONS);
     for step in 0..=10u64 {
+        if only.is_some_and(|o| o != step) {
+            continue;
+        }
         let strength = step as f64 / 10.0;
         let mut cfg = CpuConfig::standard();
         cfg.strength = strength;
-        measure(strength, &cfg, step);
+        measure(strength, &cfg, step, sessions);
     }
 }
 
-fn measure(strength: f64, cfg: &CpuConfig, seed_base: u64) {
+fn measure(strength: f64, cfg: &CpuConfig, seed_base: u64, sessions: u64) {
     let royalty = RoyaltyTable::standard_american();
     let scoring = ScoringRules::standard();
     let fl_rules = FantasylandRules::standard_progressive();
@@ -34,7 +44,7 @@ fn measure(strength: f64, cfg: &CpuConfig, seed_base: u64) {
     let mut normal_hands = 0u64;
     let mut normal_score = 0i64;
 
-    for session in 0..SESSIONS {
+    for session in 0..sessions {
         let mut fl_next = [0u8; 2];
         let mut entry_level: [Option<u8>; 2] = [None, None];
         for hand in 0..HANDS {
@@ -44,21 +54,32 @@ fn measure(strength: f64, cfg: &CpuConfig, seed_base: u64) {
             } else {
                 GameState::new(2, 2, seed).unwrap()
             };
+            let mut discards: [Vec<ofc_engine::Card>; 2] = [vec![], vec![]];
             let mut move_seed = seed.wrapping_mul(131);
             while state.street() != Street::Finished {
+                let p = state.current_player();
                 if state.street() == Street::Fantasyland {
-                    let (p, d) = choose_fantasyland(state.dealt_cards(), cfg, move_seed).unwrap();
-                    state.apply_fantasyland(&p, &d).unwrap();
+                    let (pl, d) = choose_fantasyland(state.dealt_cards(), cfg, move_seed).unwrap();
+                    state.apply_fantasyland(&pl, &d).unwrap();
                 } else {
-                    let (p, d) = choose_move_seeded(
-                        state.board(state.current_player()),
+                    let opp = 1 - p;
+                    let mut dead = discards[p].clone();
+                    let ob = state.board(opp);
+                    dead.extend(ob.top().iter().chain(ob.middle()).chain(ob.bottom()));
+                    let ctx = DeadContext { jokers: 2, dead };
+                    let (pl, d) = choose_move_ctx(
+                        state.board(p),
                         state.dealt_cards(),
                         state.street(),
+                        &ctx,
                         cfg,
                         move_seed,
                     )
                     .unwrap();
-                    state.apply(&p, d).unwrap();
+                    if let Some(card) = d {
+                        discards[p].push(card);
+                    }
+                    state.apply(&pl, d).unwrap();
                 }
                 move_seed = move_seed.wrapping_add(1);
             }

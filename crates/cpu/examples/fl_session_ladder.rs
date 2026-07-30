@@ -11,10 +11,11 @@ use ofc_engine::fantasyland::{FantasylandRules, fantasyland_entry, fantasyland_s
 use ofc_engine::game::{GameState, Street};
 use ofc_engine::royalty::RoyaltyTable;
 use ofc_engine::scoring::{ScoringRules, score_pair};
-use ofc_engine_cpu::{CpuConfig, choose_fantasyland, choose_move_seeded};
+use ofc_engine_cpu::{CpuConfig, DeadContext, choose_fantasyland, choose_move_ctx};
 
 const STRENGTHS: [f64; 5] = [0.0, 0.25, 0.5, 0.75, 1.0];
-const SESSIONS_PER_PAIR: u64 = 200;
+// rollout(s=1)が重いため 40 に抑えている(貪欲のみなら 200 でも数十秒)
+const SESSIONS_PER_PAIR: u64 = 40;
 const HANDS_PER_SESSION: u64 = 20;
 /// デッキのジョーカー枚数(チャイポ標準は 2)。
 const JOKERS: u8 = 2;
@@ -49,25 +50,32 @@ fn main() {
                     } else {
                         GameState::new(2, JOKERS, seed).unwrap()
                     };
+                    let mut discards: [Vec<ofc_engine::Card>; 2] = [vec![], vec![]];
                     let mut move_seed = seed.wrapping_mul(131);
                     while state.street() != Street::Finished {
-                        let cfg = if state.current_player() == 0 {
-                            &cfg_i
-                        } else {
-                            &cfg_j
-                        };
+                        let p = state.current_player();
+                        let cfg = if p == 0 { &cfg_i } else { &cfg_j };
                         let started = Instant::now();
                         if state.street() == Street::Fantasyland {
-                            let (p, d) =
+                            let (pl, d) =
                                 choose_fantasyland(state.dealt_cards(), cfg, move_seed).unwrap();
                             let ns = started.elapsed().as_nanos();
                             fl_moves = (fl_moves.0 + 1, fl_moves.1 + ns, fl_moves.2.max(ns));
-                            state.apply_fantasyland(&p, &d).unwrap();
+                            state.apply_fantasyland(&pl, &d).unwrap();
                         } else {
-                            let (p, d) = choose_move_seeded(
-                                state.board(state.current_player()),
+                            let opp = 1 - p;
+                            let mut dead = discards[p].clone();
+                            let ob = state.board(opp);
+                            dead.extend(ob.top().iter().chain(ob.middle()).chain(ob.bottom()));
+                            let ctx = DeadContext {
+                                jokers: JOKERS,
+                                dead,
+                            };
+                            let (pl, d) = choose_move_ctx(
+                                state.board(p),
                                 state.dealt_cards(),
                                 state.street(),
+                                &ctx,
                                 cfg,
                                 move_seed,
                             )
@@ -78,7 +86,10 @@ fn main() {
                                 normal_moves.1 + ns,
                                 normal_moves.2.max(ns),
                             );
-                            state.apply(&p, d).unwrap();
+                            if let Some(card) = d {
+                                discards[p].push(card);
+                            }
+                            state.apply(&pl, d).unwrap();
                         }
                         move_seed = move_seed.wrapping_add(1);
                     }
