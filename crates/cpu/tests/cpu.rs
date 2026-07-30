@@ -387,7 +387,7 @@ fn strengthが1未満ならrolloutではなく確率混合に委譲される() {
         hand_seed: None,
     };
     let mut cfg = rollout_config();
-    cfg.strength = 0.7;
+    cfg.strength = 0.5; // 内部目盛りでも ε 帯(< 0.8)に収まる強さ
     for seed in 0..5 {
         assert_eq!(
             choose_move_ctx(&board, &dealt, Street::Initial, &ctx, &cfg, seed),

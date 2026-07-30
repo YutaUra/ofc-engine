@@ -45,10 +45,38 @@ pub struct CpuConfig {
 }
 
 impl CpuConfig {
-    /// 配布枚数(14..=17)に対応する φ。strength のグリッド区間で線形補間する。
+    /// ユーザー向け strength を内部目盛りへワープする。
+    /// 体感調整(オーナー指定): 旧目盛りでは 0.9 が強すぎたため、
+    /// 0.5 まで恒等 / 0.7 で旧 0.9 相当 / 1.0 は据え置きの区分線形で
+    /// 上位帯を引き伸ばす。ε 混合・rollout 混合・FL 帯・φ 補間の
+    /// すべてがこの内部目盛りを参照する。
+    pub(crate) fn effective_strength(&self) -> f64 {
+        let s = self.strength.clamp(0.0, 1.0);
+        if s <= 0.5 {
+            s
+        } else if s <= 0.7 {
+            0.5 + (s - 0.5) * (0.9 - 0.5) / 0.2
+        } else {
+            0.9 + (s - 0.7) * (1.0 - 0.9) / 0.3
+        }
+    }
+
+    /// 配布枚数(14..=17)に対応する φ。内部目盛りのグリッド区間で線形補間する。
     pub fn fl_value_for_cards(&self, cards: u8) -> f64 {
+        self.fl_value_at(self.effective_strength(), cards)
+    }
+
+    /// 貪欲方策の内部で使う φ。グリッドの s=1.0 行は rollout 方策の校正値
+    /// なので、貪欲の意思決定(FL ハントボーナス)がそれを使うと FL を
+    /// 過大評価して弱くなる(方策と φ の不整合)。貪欲校正域の 0.9 で
+    /// キャップする。
+    pub(crate) fn fl_value_greedy(&self, cards: u8) -> f64 {
+        self.fl_value_at(self.effective_strength().min(0.9), cards)
+    }
+
+    fn fl_value_at(&self, strength: f64, cards: u8) -> f64 {
         let level = (cards.clamp(14, 17) - 14) as usize;
-        let s = self.strength.clamp(0.0, 1.0) * 10.0;
+        let s = strength.clamp(0.0, 1.0) * 10.0;
         let lower = (s.floor() as usize).min(10);
         let upper = (lower + 1).min(10);
         let frac = s - lower as f64;
@@ -104,7 +132,7 @@ pub fn choose_move_seeded(
     config: &CpuConfig,
     seed: u64,
 ) -> Option<Move> {
-    let strength = config.strength.clamp(0.0, 1.0);
+    let strength = config.effective_strength();
     // ε 混合はランダム↔貪欲の帯 [0, ROLLOUT_BLEND_FROM] を受け持つ。
     // 0.8 で純貪欲に到達し、それ以上は choose_move_ctx が rollout を混ぜる
     // (この関数単体では 0.8 以上 = 純貪欲)。
@@ -463,9 +491,9 @@ fn fl_setup_bonus(top: &[Card], config: &CpuConfig) -> f64 {
 
     let phi_for_pair_rank = |rank: usize| -> f64 {
         match rank {
-            r if r == Rank::Queen as usize => config.fl_value_for_cards(14),
-            r if r == Rank::King as usize => config.fl_value_for_cards(15),
-            r if r == Rank::Ace as usize => config.fl_value_for_cards(16),
+            r if r == Rank::Queen as usize => config.fl_value_greedy(14),
+            r if r == Rank::King as usize => config.fl_value_greedy(15),
+            r if r == Rank::Ace as usize => config.fl_value_greedy(16),
             _ => 0.0,
         }
     };
@@ -473,7 +501,7 @@ fn fl_setup_bonus(top: &[Card], config: &CpuConfig) -> f64 {
     let mut bonus = 0.0f64;
     // トリップス(17 枚突入)濃厚
     if max_count + jokers >= 3 && top.len() >= 2 {
-        bonus = bonus.max(config.fl_value_for_cards(17));
+        bonus = bonus.max(config.fl_value_greedy(17));
     }
     // QQ 以上の完成ペア(Joker 補完込み)
     let paired_with_joker =
@@ -540,7 +568,7 @@ pub fn choose_fantasyland(
     let stay_value = config.fl_value_for_cards(dealt.len() as u8);
     let (best_value, best_masks) = fl_search_best(dealt, config, stay_value)?;
 
-    let strength = config.strength.clamp(0.0, 1.0);
+    let strength = config.effective_strength();
     let masks = if strength >= 1.0 {
         best_masks
     } else {
@@ -898,7 +926,7 @@ pub fn choose_move_ctx(
     config: &CpuConfig,
     seed: u64,
 ) -> Option<Move> {
-    let strength = config.strength.clamp(0.0, 1.0);
+    let strength = config.effective_strength();
     if strength < ROLLOUT_BLEND_FROM {
         return choose_move_seeded(board, dealt, street, config, seed);
     }
