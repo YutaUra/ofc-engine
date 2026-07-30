@@ -915,6 +915,14 @@ pub fn choose_move_ctx(
             let coin_seed = ctx.hand_seed.unwrap_or(seed);
             let mut rng = Xorshift::new(coin_seed ^ 0x5EED_B1E5_0D01_1CE5);
             if (rng.next() % 10_000) < (p_rollout * 10_000.0) as u64 {
+                // 初手はブックがあればテーブル引き(φ̂ 再ランク済みの事前計算。
+                // rollout より速く、生成品質も lookahead 由来で高い)
+                if street == Street::Initial
+                    && let Some(book) = OPENING_BOOK.get()
+                    && let Some(placements) = book.lookup(dealt, config)
+                {
+                    return Some((placements, None));
+                }
                 rollout_choose(board, dealt, street, ctx, config, seed)
             } else {
                 choose_move(board, dealt, street, config)
@@ -1070,4 +1078,246 @@ fn playout_value(
             .fantasyland_cards
             .map(|cards| config.fl_value_for_cards(cards))
             .unwrap_or(0.0)
+}
+
+// ---- オープニングブック(初手テーブル) ----
+
+/// chinese-poker-solver のオープニングブック縮約エクスポートを読む初手テーブル。
+/// 各正準手につき上位 K 配置の (roy_part, fl_rates[4], foul_rate) を持ち、
+/// 参照時に ev(φ̂) = roy_part + Σ fl_rates·φ̂ で再ランクする(生成時 ev は
+/// 使わない。φ̂ を差し替えると最善配置が入れ替わるため上位 K を保持している)。
+///
+/// 正準化は solver の canonical_with_perm 仕様に一致させる:
+/// ランク 2..=14、スート Clubs=0/Diamonds=1/Hearts=2/Spades=3、
+/// ジョーカー (rank,suit)=(0,255)。24 のスート置換で (rank, perm[suit]) の
+/// タプル列を昇順ソートし、辞書式最小の列が正準鍵。
+pub struct OpeningBook {
+    entries: std::collections::HashMap<[u8; 5], Vec<BookPlacement>>,
+}
+
+#[derive(Debug, Clone)]
+struct BookPlacement {
+    /// 鍵カード順(コード昇順)に対応する行(0=top, 1=middle, 2=bottom)。
+    rows: [u8; 5],
+    roy: f64,
+    fl: [f64; 4],
+}
+
+/// solver のカードコード: (rank−2)×4 + suit(solver 番号)、ジョーカー = 52。
+fn solver_code(card: &Card) -> u8 {
+    match card {
+        Card::Standard { rank, suit } => (*rank as u8) * 4 + (3 - *suit as u8),
+        Card::Joker => 52,
+    }
+}
+
+/// solver 数値表現 (rank 2..=14 / suit 0..=3, joker (0,255))。
+fn solver_tuple(card: &Card) -> (u8, u8) {
+    match card {
+        Card::Standard { rank, suit } => (*rank as u8 + 2, 3 - *suit as u8),
+        Card::Joker => (0, 255),
+    }
+}
+
+fn tuple_to_card(rank: u8, suit: u8) -> Card {
+    if rank == 0 {
+        Card::Joker
+    } else {
+        Card::Standard {
+            rank: Rank::ALL_CPU[(rank - 2) as usize],
+            suit: [Suit::Clubs, Suit::Diamonds, Suit::Hearts, Suit::Spades][suit as usize],
+        }
+    }
+}
+
+/// [0,1,2,3] の全 24 順列。
+fn suit_perms() -> [[u8; 4]; 24] {
+    let mut result = [[0u8; 4]; 24];
+    let mut i = 0;
+    for a in 0..4u8 {
+        for b in 0..4u8 {
+            if b == a {
+                continue;
+            }
+            for c in 0..4u8 {
+                if c == a || c == b {
+                    continue;
+                }
+                let d = 6 - a - b - c;
+                result[i] = [a, b, c, d];
+                i += 1;
+            }
+        }
+    }
+    result
+}
+
+/// 正準化された 5 枚のタプル列(ソート済み)。
+type CanonicalTuples = [(u8, u8); 5];
+/// スート置換(perm[元スート] = 正準スート)。
+type SuitPerm = [u8; 4];
+
+impl OpeningBook {
+    /// 正準鍵(タプル列)と、それを与えるスート置換(perm[元スート]=正準スート)。
+    fn canonical_with_perm(hand: &[Card]) -> (CanonicalTuples, SuitPerm) {
+        let tuples: Vec<(u8, u8)> = hand.iter().map(solver_tuple).collect();
+        let mut best: Option<(CanonicalTuples, SuitPerm)> = None;
+        for perm in suit_perms() {
+            let mut mapped: [(u8, u8); 5] = [(0, 0); 5];
+            for (i, (r, s)) in tuples.iter().enumerate() {
+                mapped[i] = (*r, if *s == 255 { 255 } else { perm[*s as usize] });
+            }
+            mapped.sort_unstable();
+            if best.as_ref().is_none_or(|(b, _)| mapped < *b) {
+                best = Some((mapped, perm));
+            }
+        }
+        best.expect("24 置換は空でない")
+    }
+
+    /// 正準手のカード列(solver コード昇順 = 標準カードは (rank,suit) 昇順、
+    /// ジョーカーは末尾)。エクスポートの c1..c5 と同じ並び。
+    pub fn canonical_cards(hand: &[Card]) -> [Card; 5] {
+        let (tuples, _) = Self::canonical_with_perm(hand);
+        let mut cards: Vec<Card> = tuples.iter().map(|(r, s)| tuple_to_card(*r, *s)).collect();
+        cards.sort_unstable_by_key(solver_code);
+        cards.try_into().expect("5 枚")
+    }
+
+    /// 正準鍵(solver コード昇順の 5 バイト)。
+    pub fn canonical_key(hand: &[Card]) -> [u8; 5] {
+        let cards = Self::canonical_cards(hand);
+        let mut key = [0u8; 5];
+        for (i, c) in cards.iter().enumerate() {
+            key[i] = solver_code(c);
+        }
+        key
+    }
+
+    /// エクスポート形式のテキストからブックを構築する。
+    /// 1 行 = "c1 c2 c3 c4 c5<TAB>rows:roy:fl0,fl1,fl2,fl3:foul<TAB>..."
+    pub fn from_text(text: &str) -> Result<Self, String> {
+        let mut entries = std::collections::HashMap::new();
+        for (line_no, line) in text.lines().enumerate() {
+            if line.is_empty() {
+                continue;
+            }
+            let mut fields = line.split('\t');
+            let cards_field = fields.next().ok_or_else(|| format!("{line_no}: 空行"))?;
+            let cards: Vec<Card> = cards_field
+                .split(' ')
+                .map(|w| w.parse().map_err(|e| format!("{line_no}: {e:?}")))
+                .collect::<Result<_, _>>()?;
+            if cards.len() != 5 {
+                return Err(format!("{line_no}: カードが 5 枚でない"));
+            }
+            let mut key = [0u8; 5];
+            for (i, c) in cards.iter().enumerate() {
+                key[i] = solver_code(c);
+            }
+
+            let mut placements = Vec::new();
+            for field in fields {
+                let parts: Vec<&str> = field.split(':').collect();
+                if parts.len() != 4 {
+                    return Err(format!("{line_no}: 配置フィールドが 4 要素でない"));
+                }
+                let rows_str = parts[0];
+                if rows_str.len() != 5 {
+                    return Err(format!("{line_no}: rows が 5 文字でない"));
+                }
+                let mut rows = [0u8; 5];
+                for (i, ch) in rows_str.chars().enumerate() {
+                    rows[i] = match ch {
+                        't' => 0,
+                        'm' => 1,
+                        'b' => 2,
+                        _ => return Err(format!("{line_no}: 不正な行文字 {ch}")),
+                    };
+                }
+                let roy: f64 = parts[1].parse().map_err(|_| format!("{line_no}: roy"))?;
+                let fl: Vec<f64> = parts[2]
+                    .split(',')
+                    .map(|v| v.parse().map_err(|_| format!("{line_no}: fl")))
+                    .collect::<Result<_, _>>()?;
+                if fl.len() != 4 {
+                    return Err(format!("{line_no}: fl が 4 要素でない"));
+                }
+                // foul_rate(parts[3])は現状未使用(roy が非ファウル平均のため
+                // 価値計算に不要)。将来のリスク調整用にフォーマット上は保持
+                placements.push(BookPlacement {
+                    rows,
+                    roy,
+                    fl: [fl[0], fl[1], fl[2], fl[3]],
+                });
+            }
+            entries.insert(key, placements);
+        }
+        Ok(Self { entries })
+    }
+
+    /// ファイル(非圧縮テキスト)から読む。
+    pub fn load(path: &std::path::Path) -> Result<Self, String> {
+        let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        Self::from_text(&text)
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// 初手 5 枚の最良配置(φ̂ 再ランク)を「元のスートのカード」で返す。
+    pub fn lookup(&self, hand: &[Card], config: &CpuConfig) -> Option<Vec<Placement>> {
+        if hand.len() != 5 {
+            return None;
+        }
+        let key = Self::canonical_key(hand);
+        let placements = self.entries.get(&key)?;
+
+        // ev(φ̂) = roy_part + Σ fl_rates·φ̂ で再ランク(生成時 ev は使わない)
+        let phi = [
+            config.fl_value_for_cards(14),
+            config.fl_value_for_cards(15),
+            config.fl_value_for_cards(16),
+            config.fl_value_for_cards(17),
+        ];
+        let best = placements.iter().max_by(|a, b| {
+            let va = a.roy + a.fl.iter().zip(&phi).map(|(f, p)| f * p).sum::<f64>();
+            let vb = b.roy + b.fl.iter().zip(&phi).map(|(f, p)| f * p).sum::<f64>();
+            va.partial_cmp(&vb).expect("値は有限")
+        })?;
+
+        // 鍵カード順の行割り当てを、元のカードへ写し戻す
+        let canonical = Self::canonical_cards(hand);
+        let (_, perm) = Self::canonical_with_perm(hand);
+        let mut used = [false; 5];
+        let mut result = Vec::with_capacity(5);
+        for card in hand {
+            let (r, s) = solver_tuple(card);
+            let mapped = (r, if s == 255 { 255 } else { perm[s as usize] });
+            let idx = canonical
+                .iter()
+                .enumerate()
+                .position(|(i, c)| !used[i] && solver_tuple(c) == mapped)
+                .expect("正準手に必ず対応がある");
+            used[idx] = true;
+            result.push(Placement {
+                card: *card,
+                row: [RowKind::Top, RowKind::Middle, RowKind::Bottom][best.rows[idx] as usize],
+            });
+        }
+        Some(result)
+    }
+}
+
+static OPENING_BOOK: std::sync::OnceLock<OpeningBook> = std::sync::OnceLock::new();
+
+/// オープニングブックをプロセス全体に登録する(以後 strength の rollout 帯の
+/// 初手はテーブル引きになる)。2 回目以降の呼び出しは無視される。
+pub fn set_opening_book(book: OpeningBook) {
+    let _ = OPENING_BOOK.set(book);
 }
