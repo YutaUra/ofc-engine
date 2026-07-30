@@ -273,7 +273,8 @@ fn 強さは実戦の強さと単調に対応する() {
     use ofc_engine::game::GameState;
     let royalty = RoyaltyTable::standard_american();
     let scoring = ScoringRules::standard();
-    for (weak, strong) in [(0.0, 0.4), (0.4, 0.8)] {
+    // 較正済みワープでは ε 帯は user ~0.28 まで。その中の 2 ペアで検証する
+    for (weak, strong) in [(0.0, 0.15), (0.15, 0.3)] {
         let mut cfg_weak = config();
         cfg_weak.strength = weak;
         let mut cfg_strong = config();
@@ -387,7 +388,7 @@ fn strengthが1未満ならrolloutではなく確率混合に委譲される() {
         hand_seed: None,
     };
     let mut cfg = rollout_config();
-    cfg.strength = 0.5; // 内部目盛りでも ε 帯(< 0.8)に収まる強さ
+    cfg.strength = 0.1; // 内部目盛りでも ε 帯(< 0.8)に収まる強さ
     for seed in 0..5 {
         assert_eq!(
             choose_move_ctx(&board, &dealt, Street::Initial, &ctx, &cfg, seed),

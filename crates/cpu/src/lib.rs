@@ -46,19 +46,32 @@ pub struct CpuConfig {
 
 impl CpuConfig {
     /// ユーザー向け strength を内部目盛りへワープする。
-    /// 体感調整(オーナー指定): 旧目盛りでは 0.9 が強すぎたため、
-    /// 0.5 まで恒等 / 0.7 で旧 0.9 相当 / 1.0 は据え置きの区分線形で
-    /// 上位帯を引き伸ばす。ε 混合・rollout 混合・FL 帯・φ 補間の
-    /// すべてがこの内部目盛りを参照する。
+    /// アンカーは「s=0 基準の獲得利得が user に対しておおむね比例する」
+    /// ように実測から較正した値(examples/linearity_measure.rs で
+    /// g(internal) を測り、目標直線 g(1.0)×user の逆像を取った。
+    /// 内部の素の曲線は貪欲帯で平坦 → rollout 帯で急伸のため、
+    /// user 目盛りの大半が内部 [0.8, 1.0] に対応する)。
+    /// ε 混合・rollout 混合・FL 帯・φ 補間のすべてがこの内部目盛りを参照する。
     pub(crate) fn effective_strength(&self) -> f64 {
+        const ANCHORS: [(f64, f64); 11] = [
+            (0.0, 0.0),
+            (0.1, 0.189),
+            (0.2, 0.526),
+            (0.3, 0.806),
+            (0.4, 0.834),
+            (0.5, 0.862),
+            (0.6, 0.889),
+            (0.7, 0.917),
+            (0.8, 0.945),
+            (0.9, 0.972),
+            (1.0, 1.0),
+        ];
         let s = self.strength.clamp(0.0, 1.0);
-        if s <= 0.5 {
-            s
-        } else if s <= 0.7 {
-            0.5 + (s - 0.5) * (0.9 - 0.5) / 0.2
-        } else {
-            0.9 + (s - 0.7) * (1.0 - 0.9) / 0.3
-        }
+        let idx = ((s * 10.0).floor() as usize).min(9);
+        let (u0, v0) = ANCHORS[idx];
+        let (u1, v1) = ANCHORS[idx + 1];
+        let frac = if u1 > u0 { (s - u0) / (u1 - u0) } else { 0.0 };
+        v0 + (v1 - v0) * frac
     }
 
     /// 配布枚数(14..=17)に対応する φ。内部目盛りのグリッド区間で線形補間する。
@@ -68,10 +81,25 @@ impl CpuConfig {
 
     /// 貪欲方策の内部で使う φ。グリッドの s=1.0 行は rollout 方策の校正値
     /// なので、貪欲の意思決定(FL ハントボーナス)がそれを使うと FL を
-    /// 過大評価して弱くなる(方策と φ の不整合)。貪欲校正域の 0.9 で
-    /// キャップする。
+    /// 過大評価して弱くなる(方策と φ の不整合)。混合帯の貪欲アンカー
+    /// (内部 0.8)でキャップする。
     pub(crate) fn fl_value_greedy(&self, cards: u8) -> f64 {
-        self.fl_value_at(self.effective_strength().min(0.9), cards)
+        self.fl_value_at(self.effective_strength().min(ROLLOUT_BLEND_FROM), cards)
+    }
+
+    /// 混合帯(内部 ≥ 0.8)での rollout ハンド確率。ε 帯なら None。
+    pub(crate) fn blend_rollout_p(&self) -> Option<f64> {
+        let eff = self.effective_strength();
+        (eff >= ROLLOUT_BLEND_FROM).then(|| (eff - ROLLOUT_BLEND_FROM) / (1.0 - ROLLOUT_BLEND_FROM))
+    }
+
+    /// 混合帯のハンドコイン: true なら「1.0 の rollout」、false なら
+    /// 「内部 0.8 の純貪欲」として振る舞う。混合を中間設定の連続補間に
+    /// すると φ・FL 帯が薄まって期待値が線形にならないため、ハンド単位で
+    /// 二つの固定方策を切り替える(期待値 = 線形結合が構成的に成立)。
+    pub(crate) fn blend_coin(&self, p_rollout: f64, coin_seed: u64) -> bool {
+        let mut rng = Xorshift::new(coin_seed ^ 0x5EED_B1E5_0D01_1CE5);
+        (rng.next() % 10_000) < (p_rollout * 10_000.0) as u64
     }
 
     fn fl_value_at(&self, strength: f64, cards: u8) -> f64 {
@@ -81,6 +109,30 @@ impl CpuConfig {
         let upper = (lower + 1).min(10);
         let frac = s - lower as f64;
         self.fl_phi_table[lower][level] * (1.0 - frac) + self.fl_phi_table[upper][level] * frac
+    }
+
+    /// strength だけ差し替えた複製(混合帯の二方策切替用)。
+    pub(crate) fn with_strength(&self, strength: f64) -> Self {
+        let mut cfg = self.clone();
+        cfg.strength = strength;
+        cfg
+    }
+
+    /// 内部目盛りを直接指定した複製。ワープの逆写像を掛けることで
+    /// effective_strength が指定値になるようにする。
+    pub(crate) fn with_internal_strength(&self, internal: f64) -> Self {
+        // ワープは単調なので二分探索で逆写像を取る
+        let mut lo = 0.0f64;
+        let mut hi = 1.0f64;
+        for _ in 0..40 {
+            let mid = (lo + hi) / 2.0;
+            if self.with_strength(mid).effective_strength() < internal {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        self.with_strength(hi)
     }
 
     pub fn standard() -> Self {
@@ -565,6 +617,17 @@ pub fn choose_fantasyland(
         return None;
     }
 
+    // 混合帯ではハンドコインで「1.0 の完全解」か「内部 0.8 の帯選択」に
+    // 丸ごと切り替える(通常ハンドと同じ二方策混合)
+    let config = match config.blend_rollout_p() {
+        Some(p) => {
+            let target = if config.blend_coin(p, seed) { 1.0 } else { 0.8 };
+            // 内部目盛りをそのまま指定するため、逆ワープ済みの複製を作る
+            std::borrow::Cow::Owned(config.with_internal_strength(target))
+        }
+        None => std::borrow::Cow::Borrowed(config),
+    };
+    let config = config.as_ref();
     let stay_value = config.fl_value_for_cards(dealt.len() as u8);
     let (best_value, best_masks) = fl_search_best(dealt, config, stay_value)?;
 
@@ -935,23 +998,21 @@ pub fn choose_move_ctx(
         Street::Draw(4) => choose_move(board, dealt, street, config),
         _ => {
             let p_rollout = (strength - ROLLOUT_BLEND_FROM) / (1.0 - ROLLOUT_BLEND_FROM);
-            // rollout 判定の乱数は scenario 生成と独立させる。
-            // hand_seed があればハンド単位で貪欲/rollout を切り替える
-            // (手単位の混合は 1 手の貪欲がハンドを壊すため実力が混合率に
-            // 対して凸になり、strength の目盛りが歪む。ハンド単位なら
-            // 期待値 = 線形補間になることが構成的に保証される)
             let coin_seed = ctx.hand_seed.unwrap_or(seed);
-            let mut rng = Xorshift::new(coin_seed ^ 0x5EED_B1E5_0D01_1CE5);
-            if (rng.next() % 10_000) < (p_rollout * 10_000.0) as u64 {
+            if config.blend_coin(p_rollout, coin_seed) {
+                // rollout ハンドは φ・FL 帯まで含めて「strength 1.0 の方策」
+                // として丸ごと振る舞う(二方策混合。中間設定の連続補間だと
+                // 期待値が線形にならないことが較正測定で判明した)
+                let strong = config.with_strength(1.0);
                 // 初手はブックがあればテーブル引き(φ̂ 再ランク済みの事前計算。
                 // rollout より速く、生成品質も lookahead 由来で高い)
                 if street == Street::Initial
                     && let Some(book) = OPENING_BOOK.get()
-                    && let Some(placements) = book.lookup(dealt, config)
+                    && let Some(placements) = book.lookup(dealt, &strong)
                 {
                     return Some((placements, None));
                 }
-                rollout_choose(board, dealt, street, ctx, config, seed)
+                rollout_choose(board, dealt, street, ctx, &strong, seed)
             } else {
                 choose_move(board, dealt, street, config)
             }
