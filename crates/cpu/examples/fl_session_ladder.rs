@@ -70,6 +70,7 @@ fn main() {
                             let ctx = DeadContext {
                                 jokers: JOKERS,
                                 dead,
+                                hand_seed: Some(seed),
                             };
                             let (pl, d) = choose_move_ctx(
                                 state.board(p),

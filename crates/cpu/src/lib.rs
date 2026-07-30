@@ -871,6 +871,12 @@ pub struct DeadContext {
     /// デッキのジョーカー枚数(live デッキの復元に必要)。
     pub jokers: u8,
     pub dead: Vec<Card>,
+    /// ハンド内で一定の seed(配牌 seed 等)。指定すると貪欲↔rollout の
+    /// 混合を「ハンド単位」で判定する。手単位の混合は 1 手の貪欲が
+    /// ハンド全体を壊すため実力が混合率に対して凸になり、strength の
+    /// 目盛りが歪む。ハンド単位なら期待値が構成的に線形になる。
+    /// None なら手単位判定(後方互換)。
+    pub hand_seed: Option<u64>,
 }
 
 /// 貪欲↔rollout の混合が始まる strength(これ未満はランダム↔貪欲の ε 混合)。
@@ -901,8 +907,13 @@ pub fn choose_move_ctx(
         Street::Draw(4) => choose_move(board, dealt, street, config),
         _ => {
             let p_rollout = (strength - ROLLOUT_BLEND_FROM) / (1.0 - ROLLOUT_BLEND_FROM);
-            // rollout 判定の乱数は scenario 生成と独立させる
-            let mut rng = Xorshift::new(seed ^ 0x5EED_B1E5_0D01_1CE5);
+            // rollout 判定の乱数は scenario 生成と独立させる。
+            // hand_seed があればハンド単位で貪欲/rollout を切り替える
+            // (手単位の混合は 1 手の貪欲がハンドを壊すため実力が混合率に
+            // 対して凸になり、strength の目盛りが歪む。ハンド単位なら
+            // 期待値 = 線形補間になることが構成的に保証される)
+            let coin_seed = ctx.hand_seed.unwrap_or(seed);
+            let mut rng = Xorshift::new(coin_seed ^ 0x5EED_B1E5_0D01_1CE5);
             if (rng.next() % 10_000) < (p_rollout * 10_000.0) as u64 {
                 rollout_choose(board, dealt, street, ctx, config, seed)
             } else {

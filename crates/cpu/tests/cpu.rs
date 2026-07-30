@@ -336,7 +336,11 @@ fn rolloutの手は常に合法でゲームを完走できる() {
             let mut dead = discards[p].clone();
             let ob = state.board(opp);
             dead.extend(ob.top().iter().chain(ob.middle()).chain(ob.bottom()));
-            let ctx = DeadContext { jokers, dead };
+            let ctx = DeadContext {
+                jokers,
+                dead,
+                hand_seed: Some(game_seed),
+            };
             let (placements, discard) = choose_move_ctx(
                 state.board(p),
                 state.dealt_cards(),
@@ -364,6 +368,7 @@ fn rolloutは同じ入力と同じシードで決定的() {
     let ctx = DeadContext {
         jokers: 0,
         dead: vec![],
+        hand_seed: None,
     };
     assert_eq!(
         choose_move_ctx(&board, &dealt, Street::Initial, &ctx, &rollout_config(), 7),
@@ -379,6 +384,7 @@ fn strengthが1未満ならrolloutではなく確率混合に委譲される() {
     let ctx = DeadContext {
         jokers: 0,
         dead: vec![],
+        hand_seed: None,
     };
     let mut cfg = rollout_config();
     cfg.strength = 0.7;

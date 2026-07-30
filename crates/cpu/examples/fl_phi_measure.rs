@@ -66,7 +66,11 @@ fn measure(strength: f64, cfg: &CpuConfig, seed_base: u64, sessions: u64) {
                     let mut dead = discards[p].clone();
                     let ob = state.board(opp);
                     dead.extend(ob.top().iter().chain(ob.middle()).chain(ob.bottom()));
-                    let ctx = DeadContext { jokers: 2, dead };
+                    let ctx = DeadContext {
+                        jokers: 2,
+                        dead,
+                        hand_seed: Some(seed),
+                    };
                     let (pl, d) = choose_move_ctx(
                         state.board(p),
                         state.dealt_cards(),
