@@ -267,18 +267,19 @@ fn 同じシードなら中間の強さでも決定的() {
 
 #[test]
 fn 強さは実戦の強さと単調に対応する() {
-    // 隣接する強さ同士を対戦させ、強い側が勝ち越すことを確認する
-    // (全 5 段階の総当たり検証は examples/strength_ladder.rs で実施)
+    // ε 帯([0, 0.8] = ランダム↔貪欲)内の強さ同士を対戦させ、
+    // 強い側が勝ち越すことを確認する。0.8 以上の rollout 混合帯は
+    // 重いため examples/fl_session_ladder.rs で検証する
     use ofc_engine::game::GameState;
     let royalty = RoyaltyTable::standard_american();
     let scoring = ScoringRules::standard();
-    for (weak, strong) in [(0.0, 0.5), (0.5, 1.0)] {
+    for (weak, strong) in [(0.0, 0.4), (0.4, 0.8)] {
         let mut cfg_weak = config();
         cfg_weak.strength = weak;
         let mut cfg_strong = config();
         cfg_strong.strength = strong;
         let mut total = 0i32;
-        for game_seed in 0..100 {
+        for game_seed in 0..150 {
             let mut state = GameState::new(2, 0, game_seed).unwrap();
             let mut move_seed = game_seed.wrapping_mul(97);
             while state.street() != Street::Finished {

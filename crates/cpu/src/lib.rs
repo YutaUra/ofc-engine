@@ -105,9 +105,13 @@ pub fn choose_move_seeded(
     seed: u64,
 ) -> Option<Move> {
     let strength = config.strength.clamp(0.0, 1.0);
+    // ε 混合はランダム↔貪欲の帯 [0, ROLLOUT_BLEND_FROM] を受け持つ。
+    // 0.8 で純貪欲に到達し、それ以上は choose_move_ctx が rollout を混ぜる
+    // (この関数単体では 0.8 以上 = 純貪欲)。
+    let p_greedy = (strength / ROLLOUT_BLEND_FROM).min(1.0);
     let mut rng = Xorshift::new(seed);
     // 10000 分率で比較する(f64 の乱数を作らずに済ませるため)
-    let greedy = (rng.next() % 10_000) < (strength * 10_000.0) as u64;
+    let greedy = (rng.next() % 10_000) < (p_greedy * 10_000.0) as u64;
     if greedy {
         choose_move(board, dealt, street, config)
     } else {
@@ -869,10 +873,17 @@ pub struct DeadContext {
     pub dead: Vec<Card>,
 }
 
-/// strength 1.0 で CRN rollout を使う着手選択。strength < 1.0 は
-/// choose_move_seeded(ε 混合貪欲)へ委譲する。
-/// 街 4 は従来どおり厳密全列挙、街 3 以前は「貪欲上位 K 候補 ×
-/// CRN サンプルの貪欲 playout 平均」で選ぶ。
+/// 貪欲↔rollout の混合が始まる strength(これ未満はランダム↔貪欲の ε 混合)。
+/// rollout と貪欲の実力差が大きく(±9〜11/hand)、1.0 だけを rollout に
+/// すると 0.75→1.0 に崖ができるため、上位帯を確率混合で平滑化する。
+const ROLLOUT_BLEND_FROM: f64 = 0.8;
+
+/// strength に応じた着手選択(完全版)。
+/// - s ∈ [0, 0.8): 確率 s/0.8 で貪欲、残りはランダム合法手(ε 混合)
+/// - s ∈ [0.8, 1.0): 確率 (s−0.8)/0.2 で CRN rollout、残りは純貪欲
+/// - s = 1.0: 常に CRN rollout
+///
+/// 街 4 は常に厳密全列挙。乱数はすべて seed から決定的。
 pub fn choose_move_ctx(
     board: &Board,
     dealt: &[Card],
@@ -881,13 +892,23 @@ pub fn choose_move_ctx(
     config: &CpuConfig,
     seed: u64,
 ) -> Option<Move> {
-    if config.strength.clamp(0.0, 1.0) < 1.0 {
+    let strength = config.strength.clamp(0.0, 1.0);
+    if strength < ROLLOUT_BLEND_FROM {
         return choose_move_seeded(board, dealt, street, config, seed);
     }
     match street {
         Street::Finished | Street::Fantasyland => None,
         Street::Draw(4) => choose_move(board, dealt, street, config),
-        _ => rollout_choose(board, dealt, street, ctx, config, seed),
+        _ => {
+            let p_rollout = (strength - ROLLOUT_BLEND_FROM) / (1.0 - ROLLOUT_BLEND_FROM);
+            // rollout 判定の乱数は scenario 生成と独立させる
+            let mut rng = Xorshift::new(seed ^ 0x5EED_B1E5_0D01_1CE5);
+            if (rng.next() % 10_000) < (p_rollout * 10_000.0) as u64 {
+                rollout_choose(board, dealt, street, ctx, config, seed)
+            } else {
+                choose_move(board, dealt, street, config)
+            }
+        }
     }
 }
 
