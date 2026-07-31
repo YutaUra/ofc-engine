@@ -70,6 +70,7 @@ fn measure(strength: f64, cfg: &CpuConfig, seed_base: u64, sessions: u64) {
                         jokers: 2,
                         dead,
                         hand_seed: Some(seed),
+                        opponent: None,
                     };
                     let (pl, d) = choose_move_ctx(
                         state.board(p),

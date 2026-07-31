@@ -75,6 +75,7 @@ fn run_match(label: &str, players: [Player; 2]) {
                             jokers: JOKERS,
                             dead,
                             hand_seed: Some(seed),
+                            opponent: None,
                         };
                         let street_idx = match state.street() {
                             Street::Initial => 0usize,

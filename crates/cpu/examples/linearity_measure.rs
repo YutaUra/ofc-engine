@@ -86,6 +86,7 @@ fn measure(user_strength: f64, seed_base: u64, sessions: u64) -> (f64, f64, u64)
                         jokers: JOKERS,
                         dead,
                         hand_seed: Some(seed),
+                        opponent: None,
                     };
                     let (pl, d) = choose_move_ctx(
                         state.board(p),

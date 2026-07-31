@@ -318,6 +318,7 @@ fn rollout_config() -> CpuConfig {
     cfg.rollout = ofc_engine_cpu::RolloutBudget {
         top_k: 4,
         samples: [8, 8, 8, 16],
+        opponent_samples: 8,
     };
     cfg
 }
@@ -341,6 +342,7 @@ fn rolloutの手は常に合法でゲームを完走できる() {
                 jokers,
                 dead,
                 hand_seed: Some(game_seed),
+                opponent: None,
             };
             let (placements, discard) = choose_move_ctx(
                 state.board(p),
@@ -370,6 +372,7 @@ fn rolloutは同じ入力と同じシードで決定的() {
         jokers: 0,
         dead: vec![],
         hand_seed: None,
+        opponent: None,
     };
     assert_eq!(
         choose_move_ctx(&board, &dealt, Street::Initial, &ctx, &rollout_config(), 7),
@@ -386,6 +389,7 @@ fn strengthが1未満ならrolloutではなく確率混合に委譲される() {
         jokers: 0,
         dead: vec![],
         hand_seed: None,
+        opponent: None,
     };
     let mut cfg = rollout_config();
     cfg.strength = 0.1; // 内部目盛りでも ε 帯(< 0.8)に収まる強さ

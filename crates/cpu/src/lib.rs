@@ -943,6 +943,8 @@ pub struct RolloutBudget {
     /// 正解を落とす(solver の経験則)。
     pub top_k: usize,
     pub samples: [u32; 4],
+    /// 差分評価用の相手完成盤面サンプル数(相手盤面が既知のとき)。
+    pub opponent_samples: u32,
 }
 
 impl Default for RolloutBudget {
@@ -950,6 +952,7 @@ impl Default for RolloutBudget {
         Self {
             top_k: 8,
             samples: [60, 60, 80, 200],
+            opponent_samples: 40,
         }
     }
 }
@@ -962,6 +965,12 @@ pub struct DeadContext {
     /// デッキのジョーカー枚数(live デッキの復元に必要)。
     pub jokers: u8,
     pub dead: Vec<Card>,
+    /// 相手の公開盤面(ヘッズアップ)。Some なら rollout の終端評価が
+    /// ソリティア値(自 royalty+φ)から差分値(head-to-head + φ差)に
+    /// 切り替わる。相手の完成分布は事前に N 本サンプルして固定する —
+    /// 相手側の運ノイズが全候補共通の定数になり順位比較から消える
+    /// (CRN と直交する第二の分散削減。solver の設計に準拠)。
+    pub opponent: Option<Board>,
     /// ハンド内で一定の seed(配牌 seed 等)。指定すると貪欲↔rollout の
     /// 混合を「ハンド単位」で判定する。手単位の混合は 1 手の貪欲が
     /// ハンド全体を壊すため実力が混合率に対して凸になり、strength の
@@ -1038,6 +1047,12 @@ fn rollout_choose(
     ranked.truncate(config.rollout.top_k);
 
     let live = live_deck(board, dealt, ctx);
+    // 相手盤面が既知なら、完成分布を先に固定する(差分評価)
+    let opponents: Option<Vec<TerminalSide>> = ctx
+        .opponent
+        .as_ref()
+        .map(|opp| sample_opponents(opp, &live, config, seed, config.rollout.opponent_samples));
+    let opponents_ref = opponents.as_deref().filter(|o| !o.is_empty());
     let (street_idx, draws_needed) = match street {
         Street::Initial => (0usize, 12usize),
         Street::Draw(n) => (n as usize, (4 - n as usize) * 3),
@@ -1053,7 +1068,7 @@ fn rollout_choose(
         // 事実上ランダム選択に退化する — solver の注意点)
         crn_scenario(seed, u64::from(index), &live, draws_needed, &mut scenario);
         for (i, (_, mv)) in ranked.iter().enumerate() {
-            totals[i] += playout_value(board, mv, street, &scenario, config);
+            totals[i] += playout_value(board, mv, street, &scenario, config, opponents_ref);
         }
     }
 
@@ -1119,6 +1134,7 @@ fn playout_value(
     street: Street,
     scenario: &[Card],
     config: &CpuConfig,
+    opponents: Option<&[TerminalSide]>,
 ) -> f64 {
     let mut rows = [
         board.top().to_vec(),
@@ -1159,14 +1175,165 @@ fn playout_value(
     let final_board = Board::new(top, middle, bottom).expect("13 枚の完成盤面");
     let eval = evaluate_board(&final_board, &[], &config.royalty, &config.fantasyland)
         .expect("完成盤面の評価は失敗しない");
-    if eval.foul {
-        return 0.0;
+    match opponents {
+        // ソリティア値: 自分のロイヤリティ + FL 突入 φ(ファウルは 0)
+        None => {
+            if eval.foul {
+                0.0
+            } else {
+                f64::from(eval.royalty_total)
+                    + eval
+                        .fantasyland_cards
+                        .map(|cards| config.fl_value_for_cards(cards))
+                        .unwrap_or(0.0)
+            }
+        }
+        // 差分値: 固定した相手完成分布に対する head-to-head 平均 + φ 差
+        Some(opps) => {
+            let own = TerminalSide::from_eval(&eval);
+            opps.iter()
+                .map(|opp| head_to_head_value(&own, opp, config))
+                .sum::<f64>()
+                / opps.len() as f64
+        }
     }
-    f64::from(eval.royalty_total)
-        + eval
-            .fantasyland_cards
-            .map(|cards| config.fl_value_for_cards(cards))
+}
+
+/// head-to-head 採点用の完成盤面サマリ(JK 解決済み前提)。
+#[derive(Debug, Clone)]
+struct TerminalSide {
+    foul: bool,
+    hands: [HandRank; 3],
+    royalty: f64,
+    fl_cards: Option<u8>,
+}
+
+impl TerminalSide {
+    fn from_eval(eval: &ofc_engine::evaluate::BoardEvaluation) -> Self {
+        Self {
+            foul: eval.foul,
+            hands: [
+                eval.top.hand.clone(),
+                eval.middle.hand.clone(),
+                eval.bottom.hand.clone(),
+            ],
+            royalty: f64::from(eval.royalty_total),
+            fl_cards: eval.fantasyland_cards,
+        }
+    }
+}
+
+/// 1-6 + scoop + ロイヤリティ差 + φ 差(自視点)。scoring 本体と同じ規則。
+fn head_to_head_value(own: &TerminalSide, opp: &TerminalSide, config: &CpuConfig) -> f64 {
+    let phi = |side: &TerminalSide| -> f64 {
+        side.fl_cards
+            .map(|c| config.fl_value_for_cards(c))
             .unwrap_or(0.0)
+    };
+    let base = match (own.foul, opp.foul) {
+        (true, true) => 0.0,
+        (true, false) => -(6.0 + opp.royalty),
+        (false, true) => 6.0 + own.royalty,
+        (false, false) => {
+            let mut wins = 0i32;
+            for (a, b) in own.hands.iter().zip(&opp.hands) {
+                wins += match a.cmp(b) {
+                    std::cmp::Ordering::Greater => 1,
+                    std::cmp::Ordering::Less => -1,
+                    std::cmp::Ordering::Equal => 0,
+                }
+            }
+            let mut points = f64::from(wins);
+            if wins == 3 {
+                points += 3.0;
+            }
+            if wins == -3 {
+                points -= 3.0;
+            }
+            points + own.royalty - opp.royalty
+        }
+    };
+    base + phi(own) - phi(opp)
+}
+
+/// 相手の完成盤面分布をサンプルする(可視盤面に条件づけ、隠れ札は live
+/// デッキから引いて貪欲で継続完成)。相手ハンドの JK は evaluate_board が
+/// 解決してから採点に使う(未解決のまま head-to-head に渡すと
+/// foul/royalty を誤判定する — solver の踏んだバグ)。
+fn sample_opponents(
+    opp_board: &Board,
+    live: &[Card],
+    config: &CpuConfig,
+    seed: u64,
+    n: u32,
+) -> Vec<TerminalSide> {
+    let placed = opp_board.top().len() + opp_board.middle().len() + opp_board.bottom().len();
+    if placed == 13 {
+        let eval = evaluate_board(opp_board, &[], &config.royalty, &config.fantasyland)
+            .expect("完成盤面の評価は失敗しない");
+        return vec![TerminalSide::from_eval(&eval)];
+    }
+
+    let mut samples = Vec::with_capacity(n as usize);
+    let mut scenario = Vec::new();
+    for index in 0..n {
+        // 相手用の乱数列は自分の scenario と衝突しないよう salt を変える
+        crn_scenario(
+            seed ^ 0x0FF0_5A17_ED00_0001,
+            u64::from(index),
+            live,
+            17 - placed + 4, // 初手 5 枚 + 各街 3 枚に十分な枚数
+            &mut scenario,
+        );
+        let mut cursor = 0usize;
+        let mut rows = [
+            opp_board.top().to_vec(),
+            opp_board.middle().to_vec(),
+            opp_board.bottom().to_vec(),
+        ];
+        // 初手が未配置なら 5 枚配置から
+        if placed == 0 {
+            let dealt = &scenario[cursor..cursor + 5];
+            cursor += 5;
+            let current = Board::new(vec![], vec![], vec![]).expect("空盤面");
+            if let Some((placements, _)) = choose_move(&current, dealt, Street::Initial, config) {
+                for p in &placements {
+                    let idx = ROW_KINDS.iter().position(|r| *r == p.row).expect("3 行");
+                    rows[idx].push(p.card);
+                }
+            }
+        }
+        loop {
+            let placed_now: usize = rows.iter().map(|r| r.len()).sum();
+            if placed_now >= 13 {
+                break;
+            }
+            let street = Street::Draw(((placed_now - 5) / 2 + 1) as u8);
+            if cursor + 3 > scenario.len() {
+                break; // live 不足(通常起きない)
+            }
+            let dealt = &scenario[cursor..cursor + 3];
+            cursor += 3;
+            let current = Board::new(rows[0].clone(), rows[1].clone(), rows[2].clone())
+                .expect("途中盤面は有効");
+            let Some((placements, _)) = choose_move(&current, dealt, street, config) else {
+                break;
+            };
+            for p in &placements {
+                let idx = ROW_KINDS.iter().position(|r| *r == p.row).expect("3 行");
+                rows[idx].push(p.card);
+            }
+        }
+        let final_board =
+            Board::new(rows[0].clone(), rows[1].clone(), rows[2].clone()).expect("完成盤面");
+        if !final_board.is_complete() {
+            continue;
+        }
+        let eval = evaluate_board(&final_board, &[], &config.royalty, &config.fantasyland)
+            .expect("完成盤面の評価は失敗しない");
+        samples.push(TerminalSide::from_eval(&eval));
+    }
+    samples
 }
 
 // ---- オープニングブック(初手テーブル) ----

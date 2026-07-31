@@ -123,6 +123,7 @@ fn rollout帯の初手はブックがあればブックを使う() {
         jokers: 0,
         dead: vec![],
         hand_seed: Some(1),
+        opponent: None,
     };
     let (placements, discard) = choose_move_ctx(
         &board,

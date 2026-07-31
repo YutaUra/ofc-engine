@@ -71,6 +71,7 @@ fn main() {
                                 jokers: JOKERS,
                                 dead,
                                 hand_seed: Some(seed),
+                                opponent: None,
                             };
                             let (pl, d) = choose_move_ctx(
                                 state.board(p),

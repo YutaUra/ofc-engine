@@ -114,6 +114,7 @@ fn main() {
                         jokers: 2,
                         dead,
                         hand_seed: Some(seed),
+                        opponent: None,
                     };
                     let is_initial = state.street() == Street::Initial;
                     let t = Instant::now();

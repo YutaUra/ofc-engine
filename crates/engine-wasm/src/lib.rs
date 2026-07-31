@@ -339,6 +339,7 @@ fn cpu_apply_impl(state_json: &str, options_json: &str) -> Result<GameOut, Strin
                 jokers: state.joker_count(),
                 dead,
                 hand_seed: Some(options.seed),
+                opponent: None,
             };
             let (placements, discard) = ofc_engine_cpu::choose_move_ctx(
                 state.board(me),
