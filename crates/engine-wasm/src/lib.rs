@@ -278,6 +278,10 @@ struct CpuOptionsWire {
     strength: f64,
     /// 乱数シード(強さの確率混合・FL 帯選択用)。ハンドごとに変えること。
     seed: u64,
+    /// 思考レベル(rollout 予算)。"quick"(既定・数十ms)/
+    /// "normal"(~2倍強い・~100ms)/ "deep"(最強・~200ms+。wasm では数倍)。
+    #[serde(default)]
+    thinking: Option<String>,
 }
 
 /// 現在手番の着手を CPU が選び、そのまま適用して次状態を返す。
@@ -308,6 +312,24 @@ fn cpu_apply_impl(state_json: &str, options_json: &str) -> Result<GameOut, Strin
         serde_json::from_str(options_json).map_err(|e| format!("options: {e}"))?;
     let mut config = ofc_engine_cpu::CpuConfig::standard();
     config.strength = options.strength;
+    match options.thinking.as_deref() {
+        None | Some("quick") => {}
+        Some("normal") => {
+            config.rollout = ofc_engine_cpu::RolloutBudget {
+                top_k: 16,
+                samples: [240, 240, 320, 800],
+                opponent_samples: 40,
+            };
+        }
+        Some("deep") => {
+            config.rollout = ofc_engine_cpu::RolloutBudget {
+                top_k: 20,
+                samples: [480, 480, 640, 1600],
+                opponent_samples: 60,
+            };
+        }
+        Some(other) => return Err(format!("thinking: 未知のレベル {other:?}")),
+    }
 
     match state.street() {
         EngineStreet::Finished => return Err("GameFinished".to_string()),
@@ -335,11 +357,13 @@ fn cpu_apply_impl(state_json: &str, options_json: &str) -> Result<GameOut, Strin
                     );
                 }
             }
+            // ヘッズアップなら相手盤面を渡して差分評価(head-to-head)にする
+            let opponent = (state.boards().len() == 2).then(|| state.boards()[1 - me].clone());
             let ctx = ofc_engine_cpu::DeadContext {
                 jokers: state.joker_count(),
                 dead,
                 hand_seed: Some(options.seed),
-                opponent: None,
+                opponent,
             };
             let (placements, discard) = ofc_engine_cpu::choose_move_ctx(
                 state.board(me),

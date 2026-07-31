@@ -146,4 +146,10 @@ export interface CpuOptions {
   strength: number;
   /** 乱数シード。ハンドごとに変える(同シード同入力は同じ手を返す)。 */
   seed: number | bigint | string;
+  /**
+   * 思考レベル(rollout 予算)。省略時 "quick"。
+   * "normal" は約2倍強く(~100ms/手)、"deep" は最強(~200ms+/手。
+   * wasm 環境では数倍かかる)。
+   */
+  thinking?: "quick" | "normal" | "deep";
 }

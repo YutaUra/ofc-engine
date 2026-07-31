@@ -111,7 +111,11 @@ export async function createEngine(wasmInput?: InitInput): Promise<Engine> {
       JSON.parse(
         game_cpu_apply_json(
           state,
-          JSON.stringify({ strength: options.strength, seed: Number(options.seed) }),
+          JSON.stringify({
+            strength: options.strength,
+            seed: Number(options.seed),
+            thinking: options.thinking,
+          }),
         ),
       ) as GameApiResult,
     loadOpeningBook: (bookText) =>
